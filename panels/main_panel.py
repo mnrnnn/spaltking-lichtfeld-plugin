@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import os
+import traceback
 
 import lichtfeld as lf
 
 from ..operators.prepare_ops import _ops_state
-from splatking.prefs import load_prefs, save_prefs, apply_tool_defaults
-from splatking.paths import resolve_ffmpeg, resolve_colmap, format_bytes
-from splatking.video_pipeline import DENSITY_PRESETS, estimate_extract
 
 
 class SplatKingImporterPanel(lf.ui.Panel):
@@ -18,17 +16,23 @@ class SplatKingImporterPanel(lf.ui.Panel):
     space = lf.ui.PanelSpace.MAIN_PANEL_TAB
     order = 40
 
-    def __init__(self):
+    # LichtFeld may construct panels without calling Python __init__.
+    # All instance state is created lazily in _ensure_state().
+    def _ensure_state(self):
+        if getattr(self, "_sk_ready", False):
+            return
+        from splatking.prefs import load_prefs, apply_tool_defaults
+        from splatking.video_pipeline import DENSITY_PRESETS
+
         prefs = apply_tool_defaults(load_prefs())
 
         self._pack_path = prefs.get("last_pack_path", "") or ""
         self._out_dir = prefs.get("last_out_dir", "") or ""
         self._capture_type = ""
-        self._info_lines: list[str] = []
-        self._estimate_lines: list[str] = []
-        self._warning_lines: list[str] = []
+        self._info_lines = []
+        self._estimate_lines = []
+        self._warning_lines = []
 
-        # Tools (persisted; user can override anytime)
         self._ffmpeg_bin = prefs.get("ffmpeg_bin", "") or ""
         self._colmap_bin = prefs.get("colmap_bin", "") or ""
         self._vocab_tree = prefs.get("vocab_tree_path", "") or ""
@@ -36,8 +40,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
         self._colmap_status = ""
         self._tools_open = False
 
-        # Video
-        self._density_idx = 1  # Balanced
+        self._density_idx = 1
         self._density_labels = [p[0] for p in DENSITY_PRESETS]
         self._stride = int(prefs.get("video_stride", 15))
         self._max_frames = int(prefs.get("video_max_frames", 200))
@@ -53,12 +56,9 @@ class SplatKingImporterPanel(lf.ui.Panel):
         self._lens_idx = self._lens_items.index(lenses) if lenses in self._lens_items else 0
         self._inject = bool(prefs.get("video_inject_intrinsics", True))
         self._run_colmap = bool(prefs.get("video_run_colmap", False))
-        self._advanced_video = False
 
-        # LiDAR
         self._confidence_min = int(prefs.get("lidar_confidence_min", 1))
 
-        # Training cameras
         self._cam_modes = ["every_n", "random_pct", "keep_all"]
         cam_mode = prefs.get("cam_mode", "every_n")
         self._cam_mode_idx = (
@@ -68,17 +68,20 @@ class SplatKingImporterPanel(lf.ui.Panel):
         self._random_pct = float(prefs.get("cam_random_pct", 0.5))
 
         self._busy = False
-        self._refresh_tool_status()
-        if self._pack_path:
-            self._refresh_info()
+        self._draw_error = ""
+        self._sk_ready = True
+
+        try:
+            self._refresh_tool_status()
+            if self._pack_path:
+                self._refresh_info()
+        except Exception as e:
+            self._draw_error = f"init: {e}"
 
     @classmethod
     def poll(cls, context) -> bool:
         return True
 
-    # ------------------------------------------------------------------ #
-    # Preferences / tools
-    # ------------------------------------------------------------------ #
     def _current_prefs(self) -> dict:
         return {
             "ffmpeg_bin": self._ffmpeg_bin,
@@ -101,11 +104,15 @@ class SplatKingImporterPanel(lf.ui.Panel):
         }
 
     def _save_prefs(self):
+        from splatking.prefs import save_prefs
+
         save_prefs(self._current_prefs())
         state = _ops_state()
         state["status"] = "Preferences saved (ffmpeg / COLMAP paths remembered)."
 
     def _refresh_tool_status(self):
+        from splatking.paths import resolve_ffmpeg, resolve_colmap
+
         ff = resolve_ffmpeg(self._ffmpeg_bin)
         cm = resolve_colmap(self._colmap_bin)
         if ff.found:
@@ -122,7 +129,8 @@ class SplatKingImporterPanel(lf.ui.Panel):
             )
 
     def _detect_tools(self):
-        # Clear saved so detection prefers PATH/hints, then write back.
+        from splatking.prefs import apply_tool_defaults
+
         detected = apply_tool_defaults({
             **self._current_prefs(),
             "ffmpeg_bin": "",
@@ -144,9 +152,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
     def _on_progress(self, msg: str):
         self._set_status(msg)
 
-    # ------------------------------------------------------------------ #
-    # Pack scan
-    # ------------------------------------------------------------------ #
     def _selected_cameras(self) -> list[str]:
         lens = self._lens_items[self._lens_idx]
         if lens == "wide":
@@ -156,6 +161,8 @@ class SplatKingImporterPanel(lf.ui.Panel):
         return ["wide", "ultra"]
 
     def _apply_density_preset(self, idx: int):
+        from splatking.video_pipeline import DENSITY_PRESETS
+
         _, stride, max_frames, resize = DENSITY_PRESETS[idx]
         self._density_idx = idx
         self._stride = stride
@@ -164,6 +171,8 @@ class SplatKingImporterPanel(lf.ui.Panel):
         self._update_estimate()
 
     def _refresh_info(self):
+        from splatking.paths import format_bytes
+
         self._info_lines = []
         self._estimate_lines = []
         self._warning_lines = []
@@ -192,7 +201,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                     self._info_lines.append(
                         f"{s.camera}: {s.frame_count} frames · "
                         f"{s.device.width}x{s.device.height} · "
-                        f"FOV {s.device.field_of_view:.1f}° · fx={cam.params[0]:.0f} · {sz}"
+                        f"FOV {s.device.field_of_view:.1f} deg · fx={cam.params[0]:.0f} · {sz}"
                     )
                 if pack.thermal_fps_events:
                     self._info_lines.append(
@@ -210,7 +219,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 qs = [p.quality_score for p in pack.pairs if p.quality_score is not None]
                 if qs:
                     self._info_lines.append(
-                        f"Quality score: {min(qs):.2f}–{max(qs):.2f} (mean {sum(qs)/len(qs):.2f})"
+                        f"Quality score: {min(qs):.2f}-{max(qs):.2f} (mean {sum(qs)/len(qs):.2f})"
                     )
             else:
                 self._info_lines.append("Not a SplatKing pack (need splatpack.json)")
@@ -218,6 +227,9 @@ class SplatKingImporterPanel(lf.ui.Panel):
             self._info_lines.append(f"Parse error: {e}")
 
     def _update_estimate(self, pack=None):
+        from splatking.paths import format_bytes
+        from splatking.video_pipeline import estimate_extract
+
         self._estimate_lines = []
         self._warning_lines = []
         if self._capture_type != "video_dual":
@@ -233,7 +245,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 pack, self._selected_cameras(), self._stride, self._max_frames
             )
             parts = [
-                f"{cam}: {est.source_frames.get(cam, 0)} → {est.planned_frames.get(cam, 0)}"
+                f"{cam}: {est.source_frames.get(cam, 0)} -> {est.planned_frames.get(cam, 0)}"
                 for cam in est.cameras
             ]
             self._estimate_lines.append(
@@ -243,7 +255,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 f"Video payload: {format_bytes(est.total_video_bytes)} · "
                 f"resize={self._resize or 'native'} · stride={self._stride}"
             )
-            # Soft-suggest matcher without overriding a deliberate vocab_tree choice
             suggested = est.suggested_matcher
             current = self._matcher_items[self._matcher_idx]
             if suggested != current:
@@ -254,9 +265,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
         except Exception as e:
             self._warning_lines = [f"Estimate failed: {e}"]
 
-    # ------------------------------------------------------------------ #
-    # Actions
-    # ------------------------------------------------------------------ #
     def _ensure_out_dir(self) -> str:
         if self._out_dir:
             return self._out_dir
@@ -265,6 +273,8 @@ class SplatKingImporterPanel(lf.ui.Panel):
     def _run_prepare_video(self):
         from splatking.pack import load_pack, detect_capture_type, CaptureType
         from splatking.video_pipeline import VideoPrepOptions, prepare_video_dataset
+        from splatking.paths import resolve_ffmpeg, resolve_colmap, format_bytes
+        from splatking.video_pipeline import estimate_extract
 
         state = _ops_state()
         if self._busy:
@@ -449,28 +459,40 @@ class SplatKingImporterPanel(lf.ui.Panel):
             )
             self._save_prefs()
             self._set_status(
-                f"Training cameras: {summary['source_images']} → "
-                f"{summary['training_images']} ({summary['mode']}) → {out}"
+                f"Training cameras: {summary['source_images']} -> "
+                f"{summary['training_images']} ({summary['mode']}) -> {out}"
             )
         except Exception as e:
             self._set_status(f"Camera subset failed: {e}", error=True)
 
-    # ------------------------------------------------------------------ #
-    # Draw
-    # ------------------------------------------------------------------ #
     def draw(self, ui):
+        try:
+            self._ensure_state()
+            self._draw_body(ui)
+        except Exception as e:
+            tb = traceback.format_exc()
+            try:
+                ui.heading("SplatKing")
+                ui.text_colored(f"Panel error: {e}", (0.95, 0.45, 0.4, 1.0))
+                ui.text_wrapped(tb[-1500:])
+                lf.log.error(f"splatking_importer panel draw failed: {tb}")
+            except Exception:
+                pass
+
+    def _draw_body(self, ui):
         state = _ops_state()
         is_video = self._capture_type == "video_dual"
         is_lidar = self._capture_type == "photo_lidar_single"
 
         ui.heading("SplatKing")
+        if self._draw_error:
+            ui.text_colored(self._draw_error, (0.95, 0.55, 0.35, 1.0))
         ui.text_wrapped(
             "Import SplatKing packs with dual-lens intrinsics, blur filtering, "
             "and LiDAR depth — not just bare images."
         )
         ui.separator()
 
-        # --- Pack ---
         changed, path = ui.path_input("Pack folder", self._pack_path, folder_mode=True)
         if changed and path != self._pack_path:
             self._pack_path = path
@@ -501,7 +523,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
             for line in self._info_lines:
                 ui.bullet_text(line)
 
-        # --- Tools (always available; default collapsed once OK) ---
         tools_need_attention = (
             "Not found" in self._ffmpeg_status or "Not found" in self._colmap_status
         )
@@ -535,16 +556,16 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 "Vocab tree (large sets)", self._vocab_tree, folder_mode=False
             )
 
-            with ui.row() as row:
-                if row.button("Detect"):
-                    self._detect_tools()
-                if row.button("Save paths"):
-                    self._refresh_tool_status()
-                    self._save_prefs()
-                if row.small_button("Re-check"):
-                    self._refresh_tool_status()
+            if ui.button("Detect"):
+                self._detect_tools()
+            ui.same_line()
+            if ui.button("Save paths"):
+                self._refresh_tool_status()
+                self._save_prefs()
+            ui.same_line()
+            if ui.small_button("Re-check"):
+                self._refresh_tool_status()
 
-        # --- Video ---
         show_video = is_video or not self._capture_type
         if show_video and ui.collapsing_header(
             "Video prepare", default_open=is_video or not self._capture_type
@@ -577,7 +598,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 )
                 if self._matcher_items[self._matcher_idx] == "exhaustive":
                     ui.text_colored(
-                        "Exhaustive is O(N²) — only for small sets (<~150 frames).",
+                        "Exhaustive is O(N^2) — only for small sets (<~150 frames).",
                         (0.95, 0.55, 0.35, 1.0),
                     )
                 elif self._matcher_items[self._matcher_idx] == "vocab_tree":
@@ -607,14 +628,18 @@ class SplatKingImporterPanel(lf.ui.Panel):
                     )
 
                 ui.separator()
-                ui.begin_disabled(self._busy or not is_video)
-                if ui.button_styled("Prepare Video Dataset", "primary"):
-                    self._run_prepare_video()
-                ui.end_disabled()
+                can_prep = (not self._busy) and is_video
+                if can_prep:
+                    if ui.button_styled("Prepare Video Dataset", "primary"):
+                        self._run_prepare_video()
+                else:
+                    ui.text_disabled("Prepare Video Dataset (scan a video pack first)")
                 if self._busy:
-                    ui.text_colored("Working… UI may freeze while ffmpeg decodes.", (0.7, 0.8, 1.0, 1.0))
+                    ui.text_colored(
+                        "Working... UI may freeze while ffmpeg decodes.",
+                        (0.7, 0.8, 1.0, 1.0),
+                    )
 
-        # --- LiDAR ---
         show_lidar = is_lidar or not self._capture_type
         if show_lidar and ui.collapsing_header(
             "LiDAR — skip SfM", default_open=is_lidar
@@ -629,14 +654,14 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 changed, self._confidence_min = ui.slider_int(
                     "Min depth confidence (0=low 1=med 2=high)", self._confidence_min, 0, 2
                 )
-                ui.begin_disabled(self._busy or not is_lidar)
-                if ui.button_styled("1. Prepare Depth Maps", "primary"):
-                    self._run_prepare_lidar()
-                if ui.button("2. Load COLMAP_Text_Model into Scene"):
-                    self._run_load_lidar()
-                ui.end_disabled()
+                if (not self._busy) and is_lidar:
+                    if ui.button_styled("1. Prepare Depth Maps", "primary"):
+                        self._run_prepare_lidar()
+                    if ui.button("2. Load COLMAP_Text_Model into Scene"):
+                        self._run_load_lidar()
+                else:
+                    ui.text_disabled("Scan a LiDAR pack to enable Prepare / Load")
 
-        # --- Training cameras ---
         if ui.collapsing_header("Training cameras (VRAM)", default_open=False):
             ui.text_wrapped(
                 "Keep full sparse geometry for structure; thin cameras only for training "

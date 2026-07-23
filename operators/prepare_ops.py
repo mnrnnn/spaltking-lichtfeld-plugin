@@ -15,20 +15,19 @@ from lfs_plugins.props import (
     PropSubtype,
 )
 
+# Module-level state (do NOT import the plugin package by name — install folder
+# may be spaltking-lichtfeld-plugin rather than splatking_importer).
+_SK_STATE: dict[str, Any] = {
+    "pack_path": "",
+    "out_dir": "",
+    "last_report": "",
+    "status": "Idle",
+    "capture_type": "",
+}
+
 
 def _ops_state() -> dict[str, Any]:
-    """Shared mutable state between the panel and operators (hot-reload safe)."""
-    import splatking_importer as pkg
-
-    if not hasattr(pkg, "_SK_STATE"):
-        pkg._SK_STATE = {
-            "pack_path": "",
-            "out_dir": "",
-            "last_report": "",
-            "status": "Idle",
-            "capture_type": "",
-        }
-    return pkg._SK_STATE
+    return _SK_STATE
 
 
 def _tool_bins() -> tuple[str, str]:
@@ -37,7 +36,6 @@ def _tool_bins() -> tuple[str, str]:
 
     prefs = apply_tool_defaults(load_prefs())
     return prefs.get("ffmpeg_bin") or "ffmpeg", prefs.get("colmap_bin") or "colmap"
-
 
 class SplatKingPrepareVideoOp(Operator):
     label = "Prepare Video Dataset"

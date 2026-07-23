@@ -1,6 +1,6 @@
 [project]
 name = "splatking_importer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Import SplatKing captures (video dual-lens + LiDAR) into LichtFeld Studio, using all SplatKing metadata: per-camera intrinsics, blur/quality filtering, vocab-tree matching, and native LiDAR depth loss."
 authors = [{ name = "SplatKing x LichtFeld" }]
 
