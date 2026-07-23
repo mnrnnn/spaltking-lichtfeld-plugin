@@ -35,6 +35,72 @@ def _run_version(argv: list[str]) -> str:
         return ""
 
 
+def _windows_ffmpeg_hints() -> list[str]:
+    home = os.path.expanduser("~")
+    local = os.environ.get("LOCALAPPDATA", "")
+    program = os.environ.get("ProgramFiles", r"C:\Program Files")
+    hints = [
+        os.path.join(program, "ffmpeg", "bin", "ffmpeg.exe"),
+        os.path.join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"),
+        os.path.join(home, "scoop", "shims", "ffmpeg.exe"),
+        os.path.join(home, "tools", "ffmpeg", "bin", "ffmpeg.exe"),
+        # winget Gyan.FFmpeg often lands here:
+        os.path.join(local, "Microsoft", "WinGet", "Packages"),
+    ]
+    # Expand WinGet Packages/*/ffmpeg*/bin/ffmpeg.exe
+    packages = os.path.join(local, "Microsoft", "WinGet", "Packages")
+    if os.path.isdir(packages):
+        try:
+            for name in os.listdir(packages):
+                if "ffmpeg" not in name.lower() and "gyan" not in name.lower():
+                    continue
+                root = os.path.join(packages, name)
+                for dirpath, _dirnames, filenames in os.walk(root):
+                    if "ffmpeg.exe" in filenames:
+                        hints.append(os.path.join(dirpath, "ffmpeg.exe"))
+                        break
+        except OSError:
+            pass
+    return hints
+
+
+def refresh_process_path() -> None:
+    """Pull updated User/Machine PATH into this process (after winget install)."""
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+
+        def _read(root, subkey):
+            try:
+                with winreg.OpenKey(root, subkey) as k:
+                    val, _ = winreg.QueryValueEx(k, "Path")
+                    return val or ""
+            except OSError:
+                return ""
+
+        user = _read(winreg.HKEY_CURRENT_USER, r"Environment")
+        machine = _read(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        )
+        parts = []
+        for chunk in (machine, user, os.environ.get("PATH", "")):
+            for p in chunk.split(";"):
+                p = p.strip()
+                if p and p not in parts:
+                    parts.append(p)
+        # WinGet Links shim dir
+        links = os.path.join(
+            os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links"
+        )
+        if links and os.path.isdir(links) and links not in parts:
+            parts.insert(0, links)
+        os.environ["PATH"] = ";".join(parts)
+    except Exception:
+        pass
+
+
 def _windows_colmap_hints() -> list[str]:
     home = os.path.expanduser("~")
     local = os.environ.get("LOCALAPPDATA", "")
@@ -43,6 +109,7 @@ def _windows_colmap_hints() -> list[str]:
     hints = [
         os.path.join(program, "COLMAP", "colmap.exe"),
         os.path.join(program, "colmap", "COLMAP.bat"),
+        os.path.join(program, "colmap", "colmap.exe"),
         os.path.join(program86, "COLMAP", "colmap.exe"),
         os.path.join(local, "Programs", "COLMAP", "colmap.exe"),
         os.path.join(home, "tools", "colmap", "colmap.exe"),
@@ -50,6 +117,20 @@ def _windows_colmap_hints() -> list[str]:
         r"C:\colmap\colmap.exe",
         r"D:\colmap\colmap.exe",
     ]
+    packages = os.path.join(local, "Microsoft", "WinGet", "Packages")
+    if os.path.isdir(packages):
+        try:
+            for name in os.listdir(packages):
+                if "colmap" not in name.lower():
+                    continue
+                root = os.path.join(packages, name)
+                for dirpath, _dirnames, filenames in os.walk(root):
+                    for exe in ("colmap.exe", "COLMAP.bat"):
+                        if exe in filenames:
+                            hints.append(os.path.join(dirpath, exe))
+                            break
+        except OSError:
+            pass
     return hints
 
 
@@ -61,18 +142,6 @@ def _unix_colmap_hints() -> list[str]:
         "/usr/bin/colmap",
         os.path.join(home, "bin", "colmap"),
         os.path.join(home, ".local", "bin", "colmap"),
-    ]
-
-
-def _windows_ffmpeg_hints() -> list[str]:
-    home = os.path.expanduser("~")
-    local = os.environ.get("LOCALAPPDATA", "")
-    program = os.environ.get("ProgramFiles", r"C:\Program Files")
-    return [
-        os.path.join(program, "ffmpeg", "bin", "ffmpeg.exe"),
-        os.path.join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"),
-        os.path.join(home, "scoop", "shims", "ffmpeg.exe"),
-        os.path.join(home, "tools", "ffmpeg", "bin", "ffmpeg.exe"),
     ]
 
 

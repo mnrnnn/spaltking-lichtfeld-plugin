@@ -113,8 +113,10 @@ class SplatKingImporterPanel(lf.ui.Panel):
         state["status"] = "Preferences saved."
 
     def _refresh_tool_status(self):
-        from splatking.paths import resolve_ffmpeg, resolve_colmap
+        from splatking.paths import resolve_ffmpeg, resolve_colmap, refresh_process_path
 
+        refresh_process_path()
+        self._sanitize_tool_paths()
         ff = resolve_ffmpeg(self._ffmpeg_bin)
         cm = resolve_colmap(self._colmap_bin)
         if ff.found:
@@ -398,9 +400,11 @@ class SplatKingImporterPanel(lf.ui.Panel):
         except Exception as e:
             self._warning_lines = [f"Estimate failed: {e}"]
 
-    def _draw_matcher_controls(self, ui):
+    def _draw_matcher_controls(self, ui, tag: str = ""):
+        """tag keeps ImGui IDs unique when Photo/Video sections both exist."""
+        suf = f"##{tag}" if tag else ""
         changed, self._matcher_idx = ui.combo(
-            "Matcher", self._matcher_idx, self._matcher_items
+            f"Matcher{suf}", self._matcher_idx, self._matcher_items
         )
         if self._matcher_items[self._matcher_idx] == "exhaustive":
             ui.text_colored(
@@ -410,11 +414,40 @@ class SplatKingImporterPanel(lf.ui.Panel):
         elif self._matcher_items[self._matcher_idx] == "vocab_tree":
             ui.text_disabled("Requires vocab tree path under Tools.")
         changed, self._inject = ui.checkbox(
-            "Inject known PINHOLE intrinsics (wide + ultra)", self._inject
+            f"Inject known PINHOLE intrinsics (wide + ultra){suf}", self._inject
         )
         changed, self._run_colmap = ui.checkbox(
-            "Run COLMAP after prepare (needs COLMAP path)", self._run_colmap
+            f"Run COLMAP after prepare (needs COLMAP path){suf}", self._run_colmap
         )
+
+    @staticmethod
+    def _looks_like_binary(path: str) -> bool:
+        if not path or not path.strip():
+            return False
+        p = path.strip().strip('"')
+        low = p.lower()
+        if low.endswith((".exe", ".bat", ".cmd", ".bin")):
+            return True
+        # bare command name like "ffmpeg" / "colmap"
+        if os.path.sep not in p and ":" not in p:
+            return True
+        return False
+
+    def _sanitize_tool_paths(self):
+        """Drop values that clearly aren't binaries (ImGui ID collisions used to
+        write Output/..._prep into the COLMAP field)."""
+        for attr in ("_ffmpeg_bin", "_colmap_bin", "_vocab_tree"):
+            val = getattr(self, attr, "") or ""
+            if not val:
+                continue
+            # Prep dirs / pack folders must never live in tool path fields.
+            if "Output" in val.replace("\\", "/") and val.lower().endswith(
+                ("_prep", "video_prep", "photo_prep", "lidar_prep")
+            ):
+                setattr(self, attr, "")
+                continue
+            if os.path.isdir(val) and not self._looks_like_binary(val):
+                setattr(self, attr, "")
 
     def _run_prepare_video(self):
         from splatking.pack import load_pack, detect_capture_type, CaptureType
@@ -715,15 +748,18 @@ class SplatKingImporterPanel(lf.ui.Panel):
         )
         ui.separator()
 
-        # Pack folder + Browse
-        changed, path = ui.path_input("Pack folder", self._pack_path, folder_mode=True)
+        self._sanitize_tool_paths()
+
+        # Pack folder + Browse (unique ##ids — unstable IDs caused Output path
+        # to land in COLMAP and duplicated Training headers).
+        changed, path = ui.path_input("Pack folder##sk_pack", self._pack_path, folder_mode=True)
         if changed and path != self._pack_path:
             self._pack_path = path
             state["pack_path"] = path
             self._refresh_info()
             self._save_prefs()
         ui.same_line()
-        if ui.small_button("Browse##pack"):
+        if ui.small_button("Browse##sk_pack"):
             picked = self._browse_folder("Select SplatKing pack folder", self._pack_path)
             if picked:
                 self._pack_path = picked
@@ -732,16 +768,15 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 self._save_prefs()
                 self._set_status(f"Pack loaded: {picked}")
 
-        # Base output + Browse
         changed, out = ui.path_input(
-            "Base Output Folder", self._out_dir, folder_mode=True
+            "Base Output Folder##sk_out", self._out_dir, folder_mode=True
         )
         if changed:
             self._out_dir = out
             state["out_dir"] = out
             self._save_prefs()
         ui.same_line()
-        if ui.small_button("Browse##out"):
+        if ui.small_button("Browse##sk_out"):
             start = self._out_dir or self._pack_path
             picked = self._browse_folder("Select base output folder", start)
             if picked:
@@ -759,13 +794,19 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 else:
                     ui.bullet_text(line)
 
+        # Stable header tree every frame (always Photo/Video/LiDAR/Training) so
+        # ImGui IDs do not shift when capture type is detected.
         tools_need_attention = (
-            "Not found" in self._ffmpeg_status
-            or "Not found" in self._colmap_status
-            or "Not set" in self._vocab_status
+            "Not found" in self._ffmpeg_status or "Not found" in self._colmap_status
         )
-        open_tools = self._tools_open or tools_need_attention
-        if ui.collapsing_header("Tools — ffmpeg / COLMAP / vocab", default_open=open_tools):
+        if not hasattr(self, "_tools_forced_once"):
+            self._tools_forced_once = False
+        open_tools = self._tools_open or (tools_need_attention and not self._tools_forced_once)
+        if tools_need_attention and not self._tools_forced_once:
+            self._tools_forced_once = True
+            self._tools_open = True
+
+        if ui.collapsing_header("Tools - ffmpeg / COLMAP / vocab##sk_tools", default_open=open_tools):
             self._tools_open = True
             ui.text_wrapped(
                 "Paths are auto-detected and remembered. Missing tools can be installed "
@@ -775,17 +816,23 @@ class SplatKingImporterPanel(lf.ui.Panel):
             ui.label("ffmpeg")
             color = (0.4, 0.85, 0.45, 1.0) if "OK" in self._ffmpeg_status else (0.95, 0.55, 0.35, 1.0)
             ui.text_colored(self._ffmpeg_status, color)
-            changed, self._ffmpeg_bin = ui.path_input(
-                "ffmpeg binary", self._ffmpeg_bin, folder_mode=False
+            changed, ff_path = ui.path_input(
+                "ffmpeg binary##sk_ff", self._ffmpeg_bin, folder_mode=False
             )
+            if changed and (not ff_path or self._looks_like_binary(ff_path) or os.path.isfile(ff_path)):
+                self._ffmpeg_bin = ff_path
 
             ui.spacing()
             ui.label("COLMAP")
             color = (0.4, 0.85, 0.45, 1.0) if "OK" in self._colmap_status else (0.95, 0.55, 0.35, 1.0)
             ui.text_colored(self._colmap_status, color)
-            changed, self._colmap_bin = ui.path_input(
-                "COLMAP binary", self._colmap_bin, folder_mode=False
+            changed, cm_path = ui.path_input(
+                "COLMAP binary##sk_cm", self._colmap_bin, folder_mode=False
             )
+            if changed:
+                if not cm_path or self._looks_like_binary(cm_path) or os.path.isfile(cm_path):
+                    self._colmap_bin = cm_path
+                # ignore accidental folder drops (e.g. Output/video_prep)
             ui.text_disabled(
                 "Optional for Prepare: without COLMAP we still write run_colmap.bat"
             )
@@ -794,129 +841,130 @@ class SplatKingImporterPanel(lf.ui.Panel):
             ui.label("Vocab tree")
             color = (0.4, 0.85, 0.45, 1.0) if "OK" in self._vocab_status else (0.95, 0.55, 0.35, 1.0)
             ui.text_colored(self._vocab_status, color)
-            changed, self._vocab_tree = ui.path_input(
-                "Vocab tree file", self._vocab_tree, folder_mode=False
+            changed, vt_path = ui.path_input(
+                "Vocab tree file##sk_vt", self._vocab_tree, folder_mode=False
             )
+            if changed and (not vt_path or vt_path.lower().endswith(".bin") or os.path.isfile(vt_path)):
+                self._vocab_tree = vt_path
 
-            if ui.button("Detect"):
+            if ui.button("Detect##sk_detect"):
                 self._detect_tools()
             ui.same_line()
-            if ui.button("Install missing"):
+            if ui.button("Install missing##sk_install"):
                 self._install_missing()
             ui.same_line()
-            if ui.button("Download vocab tree"):
+            if ui.button("Download vocab tree##sk_vocab"):
                 self._download_vocab()
-            if ui.button("Save paths"):
+            if ui.button("Save paths##sk_save"):
+                self._sanitize_tool_paths()
                 self._refresh_tool_status()
                 self._save_prefs()
             ui.same_line()
-            if ui.small_button("Re-check"):
+            if ui.small_button("Re-check##sk_recheck"):
                 self._refresh_tool_status()
 
-        # --- Type-specific sections (only matching type is fully enabled) ---
-        if is_photo or not self._capture_type:
-            if ui.collapsing_header(
-                "Photo — stills to COLMAP", default_open=is_photo
-            ):
-                if not is_photo:
-                    ui.text_disabled("Browse a photo_dual pack to enable this section.")
+        # --- Always draw all type sections (stable ImGui tree) ---
+        if ui.collapsing_header("Photo - stills to COLMAP##sk_photo", default_open=is_photo):
+            if not is_photo:
+                ui.text_disabled("Browse a photo_dual pack to enable this section.")
+            else:
+                ui.text_wrapped(
+                    "Dual-lens stills need SfM. Copies images, injects PINHOLE "
+                    "intrinsics from EXIF, writes run_colmap.bat."
+                )
+                changed, self._lens_idx = ui.combo(
+                    "Lenses##photo", self._lens_idx, self._lens_items
+                )
+                changed, self._blur_pct = ui.slider_float(
+                    "Drop blurriest fraction##photo", self._blur_pct, 0.0, 0.5
+                )
+                self._draw_matcher_controls(ui, "photo")
+                ui.separator()
+                if not self._busy:
+                    if ui.button_styled("Prepare Photo Dataset", "primary"):
+                        self._run_prepare_photo()
                 else:
-                    ui.text_wrapped(
-                        "Dual-lens stills need SfM. Copies images, injects PINHOLE "
-                        "intrinsics from EXIF, writes run_colmap.bat."
-                    )
-                    changed, self._lens_idx = ui.combo(
-                        "Lenses##photo", self._lens_idx, self._lens_items
-                    )
-                    changed, self._blur_pct = ui.slider_float(
-                        "Drop blurriest fraction##photo", self._blur_pct, 0.0, 0.5
-                    )
-                    self._draw_matcher_controls(ui)
+                    ui.text_colored("Working...", (0.7, 0.8, 1.0, 1.0))
+
+        if ui.collapsing_header("Video - extract then COLMAP##sk_video", default_open=is_video):
+            if not is_video:
+                ui.text_disabled("Browse a video_dual pack to enable this section.")
+            else:
+                ui.label("Density preset")
+                changed, new_idx = ui.combo(
+                    "Preset##video", self._density_idx, self._density_labels
+                )
+                if changed and new_idx != self._density_idx:
+                    self._apply_density_preset(new_idx)
+
+                changed, self._lens_idx = ui.combo(
+                    "Lenses##video", self._lens_idx, self._lens_items
+                )
+                if changed:
+                    self._update_estimate()
+
+                if self._estimate_lines:
                     ui.separator()
-                    if not self._busy:
-                        if ui.button_styled("Prepare Photo Dataset", "primary"):
-                            self._run_prepare_photo()
-                    else:
-                        ui.text_colored("Working...", (0.7, 0.8, 1.0, 1.0))
+                    for line in self._estimate_lines:
+                        ui.bullet_text(line)
+                for w in self._warning_lines:
+                    ui.text_colored(w, (0.95, 0.7, 0.3, 1.0))
 
-        if is_video or not self._capture_type:
-            if ui.collapsing_header(
-                "Video — extract then COLMAP", default_open=is_video
-            ):
-                if not is_video:
-                    ui.text_disabled("Browse a video_dual pack to enable this section.")
-                else:
-                    ui.label("Density preset")
-                    changed, new_idx = ui.combo(
-                        "Preset", self._density_idx, self._density_labels
-                    )
-                    if changed and new_idx != self._density_idx:
-                        self._apply_density_preset(new_idx)
+                self._draw_matcher_controls(ui, "video")
 
-                    changed, self._lens_idx = ui.combo(
-                        "Lenses##video", self._lens_idx, self._lens_items
+                if ui.collapsing_header("Advanced video options##sk_video_adv", default_open=False):
+                    changed, self._stride = ui.slider_int("Stride##video", self._stride, 1, 60)
+                    if changed:
+                        self._update_estimate()
+                    changed, self._max_frames = ui.slider_int(
+                        "Max frames / lens (0=all)##video", self._max_frames, 0, 2000
                     )
                     if changed:
                         self._update_estimate()
+                    changed, self._resize = ui.slider_int(
+                        "Resize width (0=native)##video", self._resize, 0, 3840
+                    )
+                    changed, self._blur_pct = ui.slider_float(
+                        "Drop blurriest fraction##video", self._blur_pct, 0.0, 0.5
+                    )
 
-                    if self._estimate_lines:
-                        ui.separator()
-                        for line in self._estimate_lines:
-                            ui.bullet_text(line)
-                    for w in self._warning_lines:
-                        ui.text_colored(w, (0.95, 0.7, 0.3, 1.0))
-
-                    self._draw_matcher_controls(ui)
-
-                    if ui.collapsing_header("Advanced video options", default_open=False):
-                        changed, self._stride = ui.slider_int("Stride", self._stride, 1, 60)
-                        if changed:
-                            self._update_estimate()
-                        changed, self._max_frames = ui.slider_int(
-                            "Max frames / lens (0=all)", self._max_frames, 0, 2000
-                        )
-                        if changed:
-                            self._update_estimate()
-                        changed, self._resize = ui.slider_int(
-                            "Resize width (0=native)", self._resize, 0, 3840
-                        )
-                        changed, self._blur_pct = ui.slider_float(
-                            "Drop blurriest fraction##video", self._blur_pct, 0.0, 0.5
-                        )
-
-                    ui.separator()
-                    if (not self._busy) and is_video:
-                        if ui.button_styled("Prepare Video Dataset", "primary"):
-                            self._run_prepare_video()
-                    else:
-                        ui.text_disabled("Prepare Video Dataset (browse a video pack first)")
-                    if self._busy:
-                        ui.text_colored(
-                            "Working... UI may freeze while ffmpeg decodes.",
-                            (0.7, 0.8, 1.0, 1.0),
-                        )
-
-        if is_lidar or not self._capture_type:
-            if ui.collapsing_header("LiDAR — skip SfM", default_open=is_lidar):
-                if not is_lidar:
-                    ui.text_disabled("Browse a photo_lidar_single pack to enable this section.")
+                ui.separator()
+                if (not self._busy) and is_video:
+                    if ui.button_styled("Prepare Video Dataset", "primary"):
+                        self._run_prepare_video()
                 else:
-                    ui.text_wrapped(
-                        "SplatKing already wrote COLMAP_Text_Model on-device. "
-                        "Prepare Depth Maps unlocks native Depth Loss; then Load into Scene."
+                    ui.text_disabled("Prepare Video Dataset (browse a video pack first)")
+                if self._busy:
+                    ui.text_colored(
+                        "Working... UI may freeze while ffmpeg decodes.",
+                        (0.7, 0.8, 1.0, 1.0),
                     )
-                    changed, self._confidence_min = ui.slider_int(
-                        "Min depth confidence (0=low 1=med 2=high)", self._confidence_min, 0, 2
-                    )
-                    if (not self._busy) and is_lidar:
-                        if ui.button_styled("1. Prepare Depth Maps", "primary"):
-                            self._run_prepare_lidar()
-                        if ui.button("2. Load COLMAP_Text_Model into Scene"):
-                            self._run_load_lidar()
-                    else:
-                        ui.text_disabled("Browse a LiDAR pack to enable Prepare / Load")
 
-        if ui.collapsing_header("Training cameras (thin views for VRAM)", default_open=False):
+        if ui.collapsing_header("LiDAR - skip SfM##sk_lidar", default_open=is_lidar):
+            if not is_lidar:
+                ui.text_disabled("Browse a photo_lidar_single pack to enable this section.")
+            else:
+                ui.text_wrapped(
+                    "SplatKing already wrote COLMAP_Text_Model on-device. "
+                    "Prepare Depth Maps unlocks native Depth Loss; then Load into Scene."
+                )
+                changed, self._confidence_min = ui.slider_int(
+                    "Min depth confidence (0=low 1=med 2=high)##lidar",
+                    self._confidence_min,
+                    0,
+                    2,
+                )
+                if (not self._busy) and is_lidar:
+                    if ui.button_styled("1. Prepare Depth Maps", "primary"):
+                        self._run_prepare_lidar()
+                    if ui.button("2. Load COLMAP_Text_Model into Scene##lidar"):
+                        self._run_load_lidar()
+                else:
+                    ui.text_disabled("Browse a LiDAR pack to enable Prepare / Load")
+
+        if ui.collapsing_header(
+            "Training cameras (thin views for VRAM)##sk_train", default_open=False
+        ):
             ui.text_wrapped(
                 "Not a GPU hardware readout — thins training views only while keeping "
                 "full sparse geometry (every-N / random %). Useful for 10GB VRAM budgets."
@@ -924,15 +972,15 @@ class SplatKingImporterPanel(lf.ui.Panel):
             if self._gpu_hint:
                 ui.text_disabled(self._gpu_hint)
             changed, self._cam_mode_idx = ui.combo(
-                "Mode", self._cam_mode_idx, self._cam_modes
+                "Mode##train", self._cam_mode_idx, self._cam_modes
             )
             if self._cam_modes[self._cam_mode_idx] == "every_n":
-                changed, self._every_n = ui.slider_int("Every N", self._every_n, 1, 20)
+                changed, self._every_n = ui.slider_int("Every N##train", self._every_n, 1, 20)
             elif self._cam_modes[self._cam_mode_idx] == "random_pct":
                 changed, self._random_pct = ui.slider_float(
-                    "Keep fraction", self._random_pct, 0.1, 1.0
+                    "Keep fraction##train", self._random_pct, 0.1, 1.0
                 )
-            if ui.button("Write training subset (sparse/0_train)"):
+            if ui.button("Write training subset (sparse/0_train)##train"):
                 self._run_subsample()
 
         ui.separator()

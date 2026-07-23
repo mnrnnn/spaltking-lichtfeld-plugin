@@ -13,18 +13,15 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .paths import resolve_ffmpeg, resolve_colmap
+from .paths import resolve_ffmpeg, resolve_colmap, refresh_process_path
 
 # Compact vocab tree (~15MB) — good default; larger trees can be browsed manually.
 VOCAB_TREE_URL = "https://demuc.de/colmap/vocab_tree_flickr100K_words32K.bin"
 VOCAB_TREE_FILENAME = "vocab_tree_flickr100K_words32K.bin"
 
-# winget package ids (best-effort; COLMAP may not be on winget on all machines).
 WINGET_FFMPEG = "Gyan.FFmpeg"
-WINGET_COLMAP_CANDIDATES = [
-    "COLMAP.COLMAP",
-    "colmap.colmap",
-]
+# COLMAP is often missing from winget; try once then fall back to manual URL.
+WINGET_COLMAP = "COLMAP.COLMAP"
 
 
 @dataclass
@@ -68,14 +65,13 @@ def _winget_install(package_id: str, on_progress: Optional[Callable[[str], None]
             timeout=600,
         )
         out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
-        # 0 = success; winget also returns 0 when already installed
         if r.returncode == 0:
             return True, f"Installed or already present: {package_id}"
-        # Some winget versions return non-zero when already installed
         low = out.lower()
         if "already installed" in low or "no available upgrade" in low:
             return True, f"Already installed: {package_id}"
-        return False, f"winget failed for {package_id} (code {r.returncode}): {out[-400:]}"
+        # Keep message short for UI status line
+        return False, f"winget failed for {package_id} (code {r.returncode})"
     except subprocess.TimeoutExpired:
         return False, f"winget timed out installing {package_id}"
     except OSError as e:
@@ -115,27 +111,25 @@ def install_missing_tools(
     if not ff.found:
         ok, msg = _winget_install(WINGET_FFMPEG, on_progress)
         messages.append(msg)
-        ff = resolve_ffmpeg("")  # re-probe PATH/hints after install
+        refresh_process_path()
+        ff = resolve_ffmpeg("")
         if not ff.found and ok:
-            messages.append("ffmpeg winget reported OK but binary not on PATH yet — restart Studio or Browse.")
+            messages.append(
+                "ffmpeg installed but not found yet — click Detect/Re-check, "
+                "or Browse to WinGet Packages ffmpeg.exe"
+            )
 
     if not cm.found:
-        installed = False
-        for pkg in WINGET_COLMAP_CANDIDATES:
-            ok, msg = _winget_install(pkg, on_progress)
-            messages.append(msg)
-            if ok:
-                installed = True
-                break
+        ok, msg = _winget_install(WINGET_COLMAP, on_progress)
+        messages.append(msg)
+        refresh_process_path()
         cm = resolve_colmap("")
         if not cm.found:
             messages.append(
-                "COLMAP not found after winget. Install from "
-                "https://github.com/colmap/colmap/releases and Browse to colmap.exe "
+                "COLMAP is not on winget for this PC. Install from "
+                "https://github.com/colmap/colmap/releases then Browse to colmap.exe "
                 "(Prepare still writes run_colmap.bat without it)."
             )
-            if not installed:
-                pass
 
     ff = resolve_ffmpeg(ff.path if ff.found else ffmpeg_saved)
     cm = resolve_colmap(cm.path if cm.found else colmap_saved)
