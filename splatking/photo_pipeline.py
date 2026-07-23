@@ -1,28 +1,21 @@
-"""Photo (dual-lens stills) reconstruction preparation.
-
-Turns a ``photo_dual`` splatpack into a COLMAP-ready dataset:
-
-* copies selected wide/ultra JPEGs into ``images/{lens}/``,
-* optionally drops blurry frames using pack ``imageAnalysis`` scores,
-* injects known per-lens PINHOLE intrinsics from EXIF 35mm-equivalent FOV,
-* writes the same COLMAP orchestration scripts as the video path (no ffmpeg).
-"""
+"""Photo (dual-lens stills) reconstruction preparation."""
 
 from __future__ import annotations
 
 import json
 import os
 import shutil
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass, field, asdict
 
 from .colmap_model import ColmapModel
 from .intrinsics import ColmapCamera, colmap_camera_from_device
 from .pack import PhotoPack, PhotoFrame
 from .video_pipeline import (
+    ColmapSettings,
     build_colmap_commands,
     run_colmap_sequence,
     _write_run_script,
+    _clear_database,
 )
 
 
@@ -30,14 +23,19 @@ from .video_pipeline import (
 class PhotoPrepOptions:
     out_dir: str
     cameras: list[str] = field(default_factory=lambda: ["wide", "ultra"])
-    blur_percentile: float = 0.15  # drop blurriest fraction by pack blur score
-    matcher: str = "sequential"
-    vocab_tree_path: str = ""
+    blur_percentile: float = 0.15
     inject_intrinsics: bool = True
     colmap_bin: str = "colmap"
     run_colmap: bool = False
-    # Unused by photo path but required so build_colmap_commands can duck-type.
-    ffmpeg_bin: str = "ffmpeg"
+    colmap: ColmapSettings = field(default_factory=ColmapSettings)
+
+    @property
+    def matcher(self) -> str:
+        return self.colmap.matcher
+
+    @property
+    def vocab_tree_path(self) -> str:
+        return self.colmap.vocab_tree_path
 
 
 @dataclass
@@ -120,9 +118,7 @@ def prepare_photo_dataset(
             kept_paths.append(dst)
 
         extracted[cam] = kept_paths
-        rejected[cam] = [
-            os.path.join(pack.root, fr.image_file) for fr in dropped_frames
-        ]
+        rejected[cam] = [os.path.join(pack.root, fr.image_file) for fr in dropped_frames]
 
         list_path = os.path.join(image_root, f"_list_{cam}.txt")
         if not dry_run:
@@ -135,10 +131,7 @@ def prepare_photo_dataset(
     if not dry_run:
         os.makedirs(sparse_dir, exist_ok=True)
 
-    # Duck-type VideoPrepOptions fields for shared COLMAP builder.
-    commands = build_colmap_commands(
-        opts, cameras, image_root, database_path, sparse_dir  # type: ignore[arg-type]
-    )
+    commands = build_colmap_commands(opts, cameras, image_root, database_path, sparse_dir)
 
     if not dry_run and opts.inject_intrinsics:
         model = ColmapModel(cameras=cameras)
@@ -147,13 +140,7 @@ def prepare_photo_dataset(
     report = {
         "capture_type": "photo_dual",
         "folder": pack.folder_name,
-        "options": {
-            "cameras": opts.cameras,
-            "blur_percentile": opts.blur_percentile,
-            "matcher": opts.matcher,
-            "inject_intrinsics": opts.inject_intrinsics,
-            "run_colmap": opts.run_colmap,
-        },
+        "colmap": asdict(opts.colmap),
         "cameras": [c.to_line() for c in cameras],
         "kept_counts": {k: len(v) for k, v in extracted.items()},
         "rejected_counts": {k: len(v) for k, v in rejected.items()},
@@ -170,6 +157,7 @@ def prepare_photo_dataset(
     if not dry_run and opts.run_colmap:
         if on_progress:
             on_progress("Running COLMAP...")
+        _clear_database(database_path)
         run_colmap_sequence(commands, on_log=on_progress)
 
     return PhotoPrepResult(

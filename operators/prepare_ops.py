@@ -23,6 +23,8 @@ _SK_STATE: dict[str, Any] = {
     "last_report": "",
     "status": "Idle",
     "capture_type": "",
+    "progress": 0.0,
+    "progress_label": "",
 }
 
 
@@ -74,7 +76,7 @@ class SplatKingPrepareVideoOp(Operator):
     def execute(self, context) -> set:
         import lichtfeld as lf
         from splatking.pack import load_pack, detect_capture_type, CaptureType
-        from splatking.video_pipeline import VideoPrepOptions, prepare_video_dataset
+        from splatking.video_pipeline import VideoPrepOptions, prepare_video_dataset, ColmapSettings
 
         state = _ops_state()
         pack_path = self.pack_path or state.get("pack_path", "")
@@ -100,16 +102,17 @@ class SplatKingPrepareVideoOp(Operator):
         opts = VideoPrepOptions(
             out_dir=out_dir,
             cameras=[c.strip() for c in self.cameras.split(",") if c.strip()],
-            stride=int(self.stride),
-            max_frames_per_lens=int(self.max_frames),
+            keep_pct=max(0.01, 1.0 / max(1, int(self.stride))),
             resize_width=int(self.resize),
             blur_percentile=float(self.blur_percentile),
-            matcher=str(self.matcher),
-            vocab_tree_path=str(self.vocab_tree),
             inject_intrinsics=bool(self.inject_intrinsics),
             colmap_bin=str(self.colmap_bin) or cm_default,
             ffmpeg_bin=str(self.ffmpeg_bin) or ff_default,
             run_colmap=bool(self.run_colmap),
+            colmap=ColmapSettings(
+                matcher=str(self.matcher),
+                vocab_tree_path=str(self.vocab_tree),
+            ),
         )
         try:
             result = prepare_video_dataset(pack, opts)
@@ -164,6 +167,7 @@ class SplatKingPreparePhotoOp(Operator):
         import lichtfeld as lf
         from splatking.pack import load_pack, detect_capture_type, CaptureType, default_out_dir
         from splatking.photo_pipeline import PhotoPrepOptions, prepare_photo_dataset
+        from splatking.video_pipeline import ColmapSettings
 
         state = _ops_state()
         pack_path = self.pack_path or state.get("pack_path", "")
@@ -188,11 +192,13 @@ class SplatKingPreparePhotoOp(Operator):
             out_dir=out_dir,
             cameras=[c.strip() for c in self.cameras.split(",") if c.strip()],
             blur_percentile=float(self.blur_percentile),
-            matcher=str(self.matcher),
-            vocab_tree_path=str(self.vocab_tree),
             inject_intrinsics=bool(self.inject_intrinsics),
             colmap_bin=str(self.colmap_bin) or cm_default,
             run_colmap=bool(self.run_colmap),
+            colmap=ColmapSettings(
+                matcher=str(self.matcher),
+                vocab_tree_path=str(self.vocab_tree),
+            ),
         )
         try:
             result = prepare_photo_dataset(pack, opts)

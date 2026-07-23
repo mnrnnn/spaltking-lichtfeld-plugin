@@ -1,8 +1,4 @@
-"""Persisted plugin preferences.
-
-Uses LichtFeld ``lf.plugins.settings`` when running inside Studio; falls back to
-a JSON file next to the plugin so CLI and first-run still share defaults.
-"""
+"""Persisted plugin preferences."""
 
 from __future__ import annotations
 
@@ -12,19 +8,23 @@ from typing import Any
 
 PLUGIN_NAME = "splatking_importer"
 
-# Sensible defaults: decode less of the ~900MB dual MOV pair on first try.
 DEFAULTS: dict[str, Any] = {
     "ffmpeg_bin": "",
     "colmap_bin": "",
     "vocab_tree_path": "",
-    "video_stride": 15,
-    "video_max_frames": 200,
+    "video_keep_pct": 0.10,
     "video_resize": 1920,
     "video_blur_percentile": 0.15,
-    "video_matcher": "sequential",
     "video_inject_intrinsics": True,
     "video_run_colmap": False,
-    "video_lenses": "both",  # both | wide | ultra
+    "video_lenses": "both",
+    # COLMAP section (shared by after-prepare + Run COLMAP)
+    "colmap_matcher": "sequential",
+    "colmap_use_gpu": True,
+    "colmap_max_image_size": 3200,
+    "colmap_max_num_features": 8192,
+    "colmap_seq_overlap": 10,
+    "colmap_min_num_matches": 15,
     "lidar_confidence_min": 1,
     "cam_mode": "every_n",
     "cam_every_n": 2,
@@ -50,7 +50,6 @@ def _lf_settings():
 
 def load_prefs() -> dict[str, Any]:
     prefs = dict(DEFAULTS)
-    # File first (works offline), then overlay Studio settings if present.
     path = _json_path()
     if os.path.isfile(path):
         try:
@@ -99,9 +98,9 @@ def save_prefs(prefs: dict[str, Any]) -> None:
 
 
 def apply_tool_defaults(prefs: dict[str, Any]) -> dict[str, Any]:
-    """Fill empty ffmpeg/colmap paths via auto-detect (does not overwrite user paths)."""
-    from .paths import resolve_ffmpeg, resolve_colmap
+    from .paths import resolve_ffmpeg, resolve_colmap, refresh_process_path
 
+    refresh_process_path()
     out = dict(prefs)
     ff = resolve_ffmpeg(out.get("ffmpeg_bin", ""))
     if ff.found:

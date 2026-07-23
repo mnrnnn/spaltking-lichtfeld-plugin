@@ -21,7 +21,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
         if getattr(self, "_sk_ready", False):
             return
         from splatking.prefs import load_prefs, apply_tool_defaults
-        from splatking.video_pipeline import DENSITY_PRESETS
 
         prefs = apply_tool_defaults(load_prefs())
 
@@ -39,23 +38,27 @@ class SplatKingImporterPanel(lf.ui.Panel):
         self._colmap_status = ""
         self._vocab_status = ""
         self._tools_open = False
+        self._tools_forced_once = False
 
-        self._density_idx = 1
-        self._density_labels = [p[0] for p in DENSITY_PRESETS]
-        self._stride = int(prefs.get("video_stride", 15))
-        self._max_frames = int(prefs.get("video_max_frames", 200))
+        self._keep_pct = float(prefs.get("video_keep_pct", 0.10))
         self._resize = int(prefs.get("video_resize", 1920))
         self._blur_pct = float(prefs.get("video_blur_percentile", 0.15))
-        self._matcher_items = ["sequential", "exhaustive", "vocab_tree"]
-        matcher = prefs.get("video_matcher", "sequential")
-        self._matcher_idx = (
-            self._matcher_items.index(matcher) if matcher in self._matcher_items else 0
-        )
         self._lens_items = ["both", "wide", "ultra"]
         lenses = prefs.get("video_lenses", "both")
         self._lens_idx = self._lens_items.index(lenses) if lenses in self._lens_items else 0
         self._inject = bool(prefs.get("video_inject_intrinsics", True))
         self._run_colmap = bool(prefs.get("video_run_colmap", False))
+
+        self._matcher_items = ["sequential", "exhaustive", "vocab_tree"]
+        matcher = prefs.get("colmap_matcher", "sequential")
+        self._matcher_idx = (
+            self._matcher_items.index(matcher) if matcher in self._matcher_items else 0
+        )
+        self._colmap_use_gpu = bool(prefs.get("colmap_use_gpu", True))
+        self._colmap_max_image_size = int(prefs.get("colmap_max_image_size", 3200))
+        self._colmap_max_num_features = int(prefs.get("colmap_max_num_features", 8192))
+        self._colmap_seq_overlap = int(prefs.get("colmap_seq_overlap", 10))
+        self._colmap_min_num_matches = int(prefs.get("colmap_min_num_matches", 15))
 
         self._confidence_min = int(prefs.get("lidar_confidence_min", 1))
 
@@ -84,19 +87,43 @@ class SplatKingImporterPanel(lf.ui.Panel):
     def poll(cls, context) -> bool:
         return True
 
+    def _colmap_settings(self):
+        from splatking.video_pipeline import ColmapSettings
+
+        return ColmapSettings(
+            matcher=self._matcher_items[self._matcher_idx],
+            vocab_tree_path=self._vocab_tree,
+            use_gpu=bool(self._colmap_use_gpu),
+            max_image_size=int(self._colmap_max_image_size),
+            max_num_features=int(self._colmap_max_num_features),
+            sequential_overlap=int(self._colmap_seq_overlap),
+            min_num_matches=int(self._colmap_min_num_matches),
+        )
+
+    def _set_progress(self, frac: float, label: str = ""):
+        state = _ops_state()
+        state["progress"] = min(max(float(frac), 0.0), 1.0)
+        if label:
+            state["progress_label"] = label
+            self._set_status(label)
+
     def _current_prefs(self) -> dict:
         return {
             "ffmpeg_bin": self._ffmpeg_bin,
             "colmap_bin": self._colmap_bin,
             "vocab_tree_path": self._vocab_tree,
-            "video_stride": self._stride,
-            "video_max_frames": self._max_frames,
+            "video_keep_pct": self._keep_pct,
             "video_resize": self._resize,
             "video_blur_percentile": self._blur_pct,
-            "video_matcher": self._matcher_items[self._matcher_idx],
             "video_inject_intrinsics": self._inject,
             "video_run_colmap": self._run_colmap,
             "video_lenses": self._lens_items[self._lens_idx],
+            "colmap_matcher": self._matcher_items[self._matcher_idx],
+            "colmap_use_gpu": self._colmap_use_gpu,
+            "colmap_max_image_size": self._colmap_max_image_size,
+            "colmap_max_num_features": self._colmap_max_num_features,
+            "colmap_seq_overlap": self._colmap_seq_overlap,
+            "colmap_min_num_matches": self._colmap_min_num_matches,
             "lidar_confidence_min": self._confidence_min,
             "cam_mode": self._cam_modes[self._cam_mode_idx],
             "cam_every_n": self._every_n,
@@ -178,6 +205,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
         if self._busy:
             return
         self._busy = True
+        self._set_progress(0.0, "Installing tools...")
         try:
             result = install_missing_tools(
                 self._ffmpeg_bin,
@@ -190,8 +218,10 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 self._colmap_bin = result.colmap_path
             self._refresh_tool_status()
             self._save_prefs()
+            self._set_progress(1.0 if result.ok else 0.0, result.message)
             self._set_status(result.message, error=not result.ok)
         except Exception as e:
+            self._set_progress(0.0, "")
             self._set_status(f"Install failed: {e}", error=True)
         finally:
             self._busy = False
@@ -202,14 +232,17 @@ class SplatKingImporterPanel(lf.ui.Panel):
         if self._busy:
             return
         self._busy = True
+        self._set_progress(0.0, "Downloading vocab tree...")
         try:
             result = download_vocab_tree(on_progress=self._on_progress)
             if result.ok and result.vocab_path:
                 self._vocab_tree = result.vocab_path
                 self._save_prefs()
             self._refresh_tool_status()
+            self._set_progress(1.0 if result.ok else 0.0, result.message)
             self._set_status(result.message, error=not result.ok)
         except Exception as e:
+            self._set_progress(0.0, "")
             self._set_status(f"Vocab download failed: {e}", error=True)
         finally:
             self._busy = False
@@ -223,7 +256,26 @@ class SplatKingImporterPanel(lf.ui.Panel):
             lf.log.info(msg)
 
     def _on_progress(self, msg: str):
+        state = _ops_state()
+        if self._busy:
+            cur = float(state.get("progress", 0.0))
+            if cur < 0.95:
+                state["progress"] = min(cur + 0.02, 0.95)
+            state["progress_label"] = msg
         self._set_status(msg)
+
+    def _stage_progress(self, msg: str):
+        low = msg.lower()
+        if "extracting" in low or "ffmpeg" in low or "copying" in low:
+            self._set_progress(0.2, msg)
+        elif "scoring" in low or "sharpness" in low:
+            self._set_progress(0.45, msg)
+        elif "wrote colmap" in low:
+            self._set_progress(0.72, msg)
+        elif "running colmap" in low or msg.startswith("COLMAP ["):
+            self._set_progress(0.85, msg)
+        else:
+            self._on_progress(msg)
 
     def _browse_folder(self, title: str, start: str = "") -> str:
         try:
@@ -234,7 +286,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
             return ""
 
     def _browse_file(self, start: str = "") -> str:
-        # Prefer a generic file dialog if present; else path_input remains.
         for name in ("open_file_dialog", "open_json_file_dialog"):
             fn = getattr(lf.ui, name, None)
             if callable(fn):
@@ -259,16 +310,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
             return ["ultra"]
         return ["wide", "ultra"]
 
-    def _apply_density_preset(self, idx: int):
-        from splatking.video_pipeline import DENSITY_PRESETS
-
-        _, stride, max_frames, resize = DENSITY_PRESETS[idx]
-        self._density_idx = idx
-        self._stride = stride
-        self._max_frames = max_frames
-        self._resize = resize
-        self._update_estimate()
-
     def _default_out_preview(self) -> str:
         from splatking.pack import default_out_dir
 
@@ -282,6 +323,26 @@ class SplatKingImporterPanel(lf.ui.Panel):
         if self._out_dir:
             return self._out_dir
         return default_out_dir(self._pack_path, self._capture_type or "prep")
+
+    def _prep_dir_markers(self, directory: str) -> bool:
+        if not directory or not os.path.isdir(directory):
+            return False
+        for name in ("splatking_prep_report.json", "run_colmap.bat"):
+            if os.path.isfile(os.path.join(directory, name)):
+                return True
+        return False
+
+    def _resolve_prep_dir(self) -> str:
+        state = _ops_state()
+        if self._out_dir and self._prep_dir_markers(self._out_dir):
+            return self._out_dir
+        if self._pack_path:
+            from splatking.pack import default_out_dir
+
+            default = default_out_dir(self._pack_path, self._capture_type or "prep")
+            if default:
+                return default
+        return state.get("out_dir", "") or self._out_dir or ""
 
     def _refresh_info(self):
         from splatking.paths import format_bytes
@@ -377,7 +438,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                     return
                 pack = load_pack(self._pack_path)
             est = estimate_extract(
-                pack, self._selected_cameras(), self._stride, self._max_frames
+                pack, self._selected_cameras(), float(self._keep_pct)
             )
             parts = [
                 f"{cam}: {est.source_frames.get(cam, 0)} -> {est.planned_frames.get(cam, 0)}"
@@ -388,37 +449,26 @@ class SplatKingImporterPanel(lf.ui.Panel):
             )
             self._estimate_lines.append(
                 f"Video payload: {format_bytes(est.total_video_bytes)} · "
-                f"resize={self._resize or 'native'} · stride={self._stride}"
+                f"keep={self._keep_pct:.0%} (step={est.step}) · "
+                f"resize={self._resize or 'native'}"
             )
             suggested = est.suggested_matcher
             current = self._matcher_items[self._matcher_idx]
             if suggested != current:
                 self._estimate_lines.append(
-                    f"Suggested matcher: {suggested} (currently {current})"
+                    f"Suggested matcher: {suggested} (Run COLMAP section: {current})"
                 )
             self._warning_lines = list(est.warnings)
         except Exception as e:
             self._warning_lines = [f"Estimate failed: {e}"]
 
-    def _draw_matcher_controls(self, ui, tag: str = ""):
-        """tag keeps ImGui IDs unique when Photo/Video sections both exist."""
-        suf = f"##{tag}" if tag else ""
-        changed, self._matcher_idx = ui.combo(
-            f"Matcher{suf}", self._matcher_idx, self._matcher_items
-        )
-        if self._matcher_items[self._matcher_idx] == "exhaustive":
-            ui.text_colored(
-                "Exhaustive is O(N^2) — only for small sets (<~150 frames).",
-                (0.95, 0.55, 0.35, 1.0),
-            )
-        elif self._matcher_items[self._matcher_idx] == "vocab_tree":
-            ui.text_disabled("Requires vocab tree path under Tools.")
-        changed, self._inject = ui.checkbox(
-            f"Inject known PINHOLE intrinsics (wide + ultra){suf}", self._inject
-        )
-        changed, self._run_colmap = ui.checkbox(
-            f"Run COLMAP after prepare (needs COLMAP path){suf}", self._run_colmap
-        )
+    def _colmap_binary_ok(self) -> bool:
+        return "OK" in self._colmap_status
+
+    def _vocab_ok_for_matcher(self) -> bool:
+        if self._matcher_items[self._matcher_idx] != "vocab_tree":
+            return True
+        return bool(self._vocab_tree and os.path.isfile(self._vocab_tree))
 
     @staticmethod
     def _looks_like_binary(path: str) -> bool:
@@ -428,7 +478,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
         low = p.lower()
         if low.endswith((".exe", ".bat", ".cmd", ".bin")):
             return True
-        # bare command name like "ffmpeg" / "colmap"
         if os.path.sep not in p and ":" not in p:
             return True
         return False
@@ -440,7 +489,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
             val = getattr(self, attr, "") or ""
             if not val:
                 continue
-            # Prep dirs / pack folders must never live in tool path fields.
             if "Output" in val.replace("\\", "/") and val.lower().endswith(
                 ("_prep", "video_prep", "photo_prep", "lidar_prep")
             ):
@@ -484,9 +532,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 return
             self._colmap_bin = cm.path
 
-        if self._matcher_items[self._matcher_idx] == "vocab_tree" and not (
-            self._vocab_tree and os.path.isfile(self._vocab_tree)
-        ):
+        if not self._vocab_ok_for_matcher():
             self._set_status(
                 "vocab_tree matcher needs a vocab tree — Download or Browse under Tools.",
                 error=True,
@@ -504,44 +550,46 @@ class SplatKingImporterPanel(lf.ui.Panel):
         state["out_dir"] = out_dir
         self._busy = True
         self._save_prefs()
+        self._set_progress(0.0, "Preparing video dataset...")
         try:
             pack = load_pack(pack_path)
             est = estimate_extract(
-                pack, self._selected_cameras(), self._stride, self._max_frames
+                pack, self._selected_cameras(), float(self._keep_pct)
             )
-            self._set_status(
+            self._set_progress(
+                0.05,
                 f"Decoding ~{est.total_planned} frames from "
-                f"{format_bytes(est.total_video_bytes)} of video..."
+                f"{format_bytes(est.total_video_bytes)} of video...",
             )
             result = prepare_video_dataset(
                 pack,
                 VideoPrepOptions(
                     out_dir=out_dir,
                     cameras=self._selected_cameras(),
-                    stride=int(self._stride),
-                    max_frames_per_lens=int(self._max_frames),
+                    keep_pct=float(self._keep_pct),
                     resize_width=int(self._resize),
                     blur_percentile=float(self._blur_pct),
-                    matcher=self._matcher_items[self._matcher_idx],
-                    vocab_tree_path=self._vocab_tree,
                     inject_intrinsics=bool(self._inject),
                     colmap_bin=self._colmap_bin or "colmap",
                     ffmpeg_bin=self._ffmpeg_bin or "ffmpeg",
                     run_colmap=bool(self._run_colmap),
+                    colmap=self._colmap_settings(),
                 ),
-                on_progress=self._on_progress,
+                on_progress=self._stage_progress,
             )
             kept = {k: len(v) for k, v in result.extracted.items()}
             dropped = {k: len(v) for k, v in result.rejected.items()}
             state["last_report"] = result.report_path
             state["capture_type"] = "video_dual"
             script = os.path.join(result.out_dir, "run_colmap.bat")
+            self._set_progress(1.0, "Video prepare finished.")
             self._set_status(
                 f"Done. Kept {kept} (blur-dropped {dropped}). "
                 f"Intrinsics injected for {len(result.cameras)} cameras. "
                 f"{'COLMAP ran.' if self._run_colmap else f'Next: run {script}'}"
             )
         except Exception as e:
+            self._set_progress(0.0, "")
             self._set_status(f"Video prepare failed: {e}", error=True)
         finally:
             self._busy = False
@@ -574,9 +622,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 return
             self._colmap_bin = cm.path
 
-        if self._matcher_items[self._matcher_idx] == "vocab_tree" and not (
-            self._vocab_tree and os.path.isfile(self._vocab_tree)
-        ):
+        if not self._vocab_ok_for_matcher():
             self._set_status(
                 "vocab_tree matcher needs a vocab tree — Download or Browse under Tools.",
                 error=True,
@@ -589,8 +635,8 @@ class SplatKingImporterPanel(lf.ui.Panel):
         state["out_dir"] = out_dir
         self._busy = True
         self._save_prefs()
+        self._set_progress(0.0, "Preparing photo dataset...")
         try:
-            self._set_status("Preparing photo dataset...")
             pack = load_pack(pack_path)
             result = prepare_photo_dataset(
                 pack,
@@ -598,25 +644,86 @@ class SplatKingImporterPanel(lf.ui.Panel):
                     out_dir=out_dir,
                     cameras=self._selected_cameras(),
                     blur_percentile=float(self._blur_pct),
-                    matcher=self._matcher_items[self._matcher_idx],
-                    vocab_tree_path=self._vocab_tree,
                     inject_intrinsics=bool(self._inject),
                     colmap_bin=self._colmap_bin or "colmap",
                     run_colmap=bool(self._run_colmap),
+                    colmap=self._colmap_settings(),
                 ),
-                on_progress=self._on_progress,
+                on_progress=self._stage_progress,
             )
             kept = {k: len(v) for k, v in result.extracted.items()}
             dropped = {k: len(v) for k, v in result.rejected.items()}
             state["last_report"] = result.report_path
             state["capture_type"] = "photo_dual"
             script = os.path.join(result.out_dir, "run_colmap.bat")
+            self._set_progress(1.0, "Photo prepare finished.")
             self._set_status(
                 f"Photo ready. Kept {kept} (blur-dropped {dropped}). "
                 f"{'COLMAP ran.' if self._run_colmap else f'Next: run {script}'}"
             )
         except Exception as e:
+            self._set_progress(0.0, "")
             self._set_status(f"Photo prepare failed: {e}", error=True)
+        finally:
+            self._busy = False
+
+    def _run_colmap_only(self):
+        from splatking.video_pipeline import run_colmap_on_prep
+        from splatking.paths import resolve_colmap
+
+        if self._busy:
+            return
+        prep_dir = self._resolve_prep_dir()
+        if not prep_dir or not os.path.isdir(prep_dir):
+            self._set_status(
+                "No prep directory found. Prepare Photo/Video first.",
+                error=True,
+            )
+            return
+        if not os.path.isdir(os.path.join(prep_dir, "images")):
+            self._set_status(f"No images/ in prep dir: {prep_dir}", error=True)
+            return
+
+        cm = resolve_colmap(self._colmap_bin)
+        if not cm.found:
+            self._set_status(
+                "COLMAP not found. Install missing or Browse under Tools.",
+                error=True,
+            )
+            self._tools_open = True
+            return
+        self._colmap_bin = cm.path
+
+        if not self._vocab_ok_for_matcher():
+            self._set_status(
+                "vocab_tree matcher needs a vocab tree — Download or Browse under Tools.",
+                error=True,
+            )
+            self._tools_open = True
+            return
+
+        state = _ops_state()
+        state["out_dir"] = prep_dir
+        self._busy = True
+        self._save_prefs()
+        self._set_progress(0.0, "Running COLMAP...")
+        try:
+            run_colmap_on_prep(
+                prep_dir,
+                self._colmap_bin or "colmap",
+                self._colmap_settings(),
+                cameras=self._selected_cameras()
+                if self._capture_type in ("video_dual", "photo_dual")
+                else None,
+                inject_intrinsics=bool(self._inject),
+                on_progress=self._stage_progress,
+            )
+            sparse = os.path.join(prep_dir, "sparse", "0")
+            self._set_progress(1.0, "COLMAP finished.")
+            self._set_status(f"COLMAP finished. Sparse model: {sparse}")
+        except Exception as e:
+            self._set_progress(0.0, "")
+            self._set_status(f"COLMAP failed: {e}", error=True)
         finally:
             self._busy = False
 
@@ -640,8 +747,8 @@ class SplatKingImporterPanel(lf.ui.Panel):
         state["out_dir"] = out_dir
         self._busy = True
         self._save_prefs()
+        self._set_progress(0.0, "Preparing LiDAR depth maps...")
         try:
-            self._set_status("Decoding LiDAR depth maps...")
             pack = load_pack(pack_path)
             result = prepare_lidar_dataset(
                 pack,
@@ -652,12 +759,14 @@ class SplatKingImporterPanel(lf.ui.Panel):
             )
             state["capture_type"] = "photo_lidar_single"
             state["last_report"] = result.manifest_path or ""
+            self._set_progress(1.0, "LiDAR prepare finished.")
             self._set_status(
                 f"LiDAR ready: {result.registered_images} registered images, "
                 f"{result.num_points3d:,} points, {result.depth_written} depth maps. "
                 "Use Load into Scene next."
             )
         except Exception as e:
+            self._set_progress(0.0, "")
             self._set_status(f"LiDAR prepare failed: {e}", error=True)
         finally:
             self._busy = False
@@ -691,7 +800,11 @@ class SplatKingImporterPanel(lf.ui.Panel):
         if self._capture_type == "photo_lidar_single" and self._pack_path:
             sparse = os.path.join(self._pack_path, "COLMAP_Text_Model", "sparse", "0")
         if not sparse or not os.path.isdir(sparse):
-            cand = os.path.join(state.get("out_dir", "") or self._out_dir or self._ensure_out_dir(), "sparse", "0")
+            cand = os.path.join(
+                state.get("out_dir", "") or self._out_dir or self._ensure_out_dir(),
+                "sparse",
+                "0",
+            )
             if os.path.isdir(cand):
                 sparse = cand
         if not sparse or not os.path.isdir(sparse):
@@ -750,8 +863,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
 
         self._sanitize_tool_paths()
 
-        # Pack folder + Browse (unique ##ids — unstable IDs caused Output path
-        # to land in COLMAP and duplicated Training headers).
         changed, path = ui.path_input("Pack folder##sk_pack", self._pack_path, folder_mode=True)
         if changed and path != self._pack_path:
             self._pack_path = path
@@ -794,13 +905,9 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 else:
                     ui.bullet_text(line)
 
-        # Stable header tree every frame (always Photo/Video/LiDAR/Training) so
-        # ImGui IDs do not shift when capture type is detected.
         tools_need_attention = (
             "Not found" in self._ffmpeg_status or "Not found" in self._colmap_status
         )
-        if not hasattr(self, "_tools_forced_once"):
-            self._tools_forced_once = False
         open_tools = self._tools_open or (tools_need_attention and not self._tools_forced_once)
         if tools_need_attention and not self._tools_forced_once:
             self._tools_forced_once = True
@@ -832,7 +939,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
             if changed:
                 if not cm_path or self._looks_like_binary(cm_path) or os.path.isfile(cm_path):
                     self._colmap_bin = cm_path
-                # ignore accidental folder drops (e.g. Output/video_prep)
             ui.text_disabled(
                 "Optional for Prepare: without COLMAP we still write run_colmap.bat"
             )
@@ -863,7 +969,6 @@ class SplatKingImporterPanel(lf.ui.Panel):
             if ui.small_button("Re-check##sk_recheck"):
                 self._refresh_tool_status()
 
-        # --- Always draw all type sections (stable ImGui tree) ---
         if ui.collapsing_header("Photo - stills to COLMAP##sk_photo", default_open=is_photo):
             if not is_photo:
                 ui.text_disabled("Browse a photo_dual pack to enable this section.")
@@ -878,10 +983,21 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 changed, self._blur_pct = ui.slider_float(
                     "Drop blurriest fraction##photo", self._blur_pct, 0.0, 0.5
                 )
-                self._draw_matcher_controls(ui, "photo")
+                changed, self._inject = ui.checkbox(
+                    "Inject known PINHOLE intrinsics (wide + ultra)##photo", self._inject
+                )
+                changed, self._run_colmap = ui.checkbox(
+                    "Run COLMAP after prepare (needs COLMAP path)##photo", self._run_colmap
+                )
+                ui.text_disabled("Uses settings from the Run COLMAP section below.")
+                if self._run_colmap and not self._colmap_binary_ok():
+                    ui.text_colored(
+                        "COLMAP binary required — Install or Browse under Tools.",
+                        (0.95, 0.55, 0.35, 1.0),
+                    )
                 ui.separator()
                 if not self._busy:
-                    if ui.button_styled("Prepare Photo Dataset", "primary"):
+                    if ui.button_styled("Prepare Photo Dataset##photo", "primary"):
                         self._run_prepare_photo()
                 else:
                     ui.text_colored("Working...", (0.7, 0.8, 1.0, 1.0))
@@ -890,13 +1006,18 @@ class SplatKingImporterPanel(lf.ui.Panel):
             if not is_video:
                 ui.text_disabled("Browse a video_dual pack to enable this section.")
             else:
-                ui.label("Density preset")
-                changed, new_idx = ui.combo(
-                    "Preset##video", self._density_idx, self._density_labels
+                ui.text_wrapped(
+                    "Extract uniform frame samples with ffmpeg, filter blur, inject "
+                    "PINHOLE intrinsics, then COLMAP (optional)."
                 )
-                if changed and new_idx != self._density_idx:
-                    self._apply_density_preset(new_idx)
-
+                changed, self._keep_pct = ui.slider_float(
+                    "Keep frames %##video", self._keep_pct, 0.05, 1.0
+                )
+                if changed:
+                    self._update_estimate()
+                changed, self._resize = ui.slider_int(
+                    "Resize width (0=native)##video", self._resize, 0, 3840
+                )
                 changed, self._lens_idx = ui.combo(
                     "Lenses##video", self._lens_idx, self._lens_items
                 )
@@ -910,35 +1031,69 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 for w in self._warning_lines:
                     ui.text_colored(w, (0.95, 0.7, 0.3, 1.0))
 
-                self._draw_matcher_controls(ui, "video")
-
-                if ui.collapsing_header("Advanced video options##sk_video_adv", default_open=False):
-                    changed, self._stride = ui.slider_int("Stride##video", self._stride, 1, 60)
-                    if changed:
-                        self._update_estimate()
-                    changed, self._max_frames = ui.slider_int(
-                        "Max frames / lens (0=all)##video", self._max_frames, 0, 2000
-                    )
-                    if changed:
-                        self._update_estimate()
-                    changed, self._resize = ui.slider_int(
-                        "Resize width (0=native)##video", self._resize, 0, 3840
-                    )
-                    changed, self._blur_pct = ui.slider_float(
-                        "Drop blurriest fraction##video", self._blur_pct, 0.0, 0.5
+                changed, self._blur_pct = ui.slider_float(
+                    "Drop blurriest fraction##video", self._blur_pct, 0.0, 0.5
+                )
+                changed, self._inject = ui.checkbox(
+                    "Inject known PINHOLE intrinsics (wide + ultra)##video", self._inject
+                )
+                changed, self._run_colmap = ui.checkbox(
+                    "Run COLMAP after prepare (needs COLMAP path)##video", self._run_colmap
+                )
+                ui.text_disabled("Uses settings from the Run COLMAP section below.")
+                if self._run_colmap and not self._colmap_binary_ok():
+                    ui.text_colored(
+                        "COLMAP binary required — Install or Browse under Tools.",
+                        (0.95, 0.55, 0.35, 1.0),
                     )
 
                 ui.separator()
-                if (not self._busy) and is_video:
-                    if ui.button_styled("Prepare Video Dataset", "primary"):
+                if not self._busy:
+                    if ui.button_styled("Prepare Video Dataset##video", "primary"):
                         self._run_prepare_video()
                 else:
-                    ui.text_disabled("Prepare Video Dataset (browse a video pack first)")
-                if self._busy:
                     ui.text_colored(
                         "Working... UI may freeze while ffmpeg decodes.",
                         (0.7, 0.8, 1.0, 1.0),
                     )
+
+        if ui.collapsing_header("Run COLMAP##sk_colmap", default_open=False):
+            prep_dir = self._resolve_prep_dir()
+            ui.text_disabled(f"Prep dir: {prep_dir or '(none — prepare first)'}")
+            changed, self._matcher_idx = ui.combo(
+                "Matcher##colmap", self._matcher_idx, self._matcher_items
+            )
+            if self._matcher_items[self._matcher_idx] == "exhaustive":
+                ui.text_colored(
+                    "Exhaustive is O(N^2) — only for small sets (<~150 frames).",
+                    (0.95, 0.55, 0.35, 1.0),
+                )
+            changed, self._colmap_use_gpu = ui.checkbox(
+                "Use GPU for SIFT##colmap", self._colmap_use_gpu
+            )
+            changed, self._colmap_max_image_size = ui.slider_int(
+                "Max image size (0=unlimited)##colmap",
+                self._colmap_max_image_size,
+                0,
+                6400,
+            )
+            changed, self._colmap_max_num_features = ui.slider_int(
+                "Max SIFT features##colmap", self._colmap_max_num_features, 512, 32768
+            )
+            if self._matcher_items[self._matcher_idx] == "sequential":
+                changed, self._colmap_seq_overlap = ui.slider_int(
+                    "Sequential overlap##colmap", self._colmap_seq_overlap, 1, 50
+                )
+            changed, self._colmap_min_num_matches = ui.slider_int(
+                "Mapper min matches##colmap", self._colmap_min_num_matches, 2, 100
+            )
+            if self._matcher_items[self._matcher_idx] == "vocab_tree":
+                ui.text_disabled("Vocab tree path is set under Tools.")
+            if not self._busy:
+                if ui.button_styled("Run COLMAP now##colmap", "primary"):
+                    self._run_colmap_only()
+            else:
+                ui.text_colored("Working...", (0.7, 0.8, 1.0, 1.0))
 
         if ui.collapsing_header("LiDAR - skip SfM##sk_lidar", default_open=is_lidar):
             if not is_lidar:
@@ -955,7 +1110,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                     2,
                 )
                 if (not self._busy) and is_lidar:
-                    if ui.button_styled("1. Prepare Depth Maps", "primary"):
+                    if ui.button_styled("1. Prepare Depth Maps##lidar", "primary"):
                         self._run_prepare_lidar()
                     if ui.button("2. Load COLMAP_Text_Model into Scene##lidar"):
                         self._run_load_lidar()
@@ -984,7 +1139,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 self._run_subsample()
 
         ui.separator()
-        ui.label("Status")
+        ui.label("Status##sk_status")
         status = state.get("status", "Idle")
         if status.lower().startswith("error") or "failed" in status.lower():
             ui.text_colored(status, (0.95, 0.45, 0.4, 1.0))
@@ -994,3 +1149,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
             ui.text_disabled("Idle — Browse a pack to begin")
         if state.get("last_report"):
             ui.text_disabled(state["last_report"])
+
+        progress = float(state.get("progress", 0.0))
+        if progress > 0 or self._busy:
+            ui.progress_bar(progress, overlay=state.get("progress_label", ""))
