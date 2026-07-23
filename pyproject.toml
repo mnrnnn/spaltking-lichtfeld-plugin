@@ -1,0 +1,26 @@
+[project]
+name = "splatking_importer"
+version = "0.1.0"
+description = "Import SplatKing captures (video dual-lens + LiDAR) into LichtFeld Studio, using all SplatKing metadata: per-camera intrinsics, blur/quality filtering, vocab-tree matching, and native LiDAR depth loss."
+authors = [{ name = "SplatKing x LichtFeld" }]
+
+# Pure-python core has no hard runtime deps. numpy/opencv are used opportunistically
+# (blur scoring, depth decoding). They are declared so LichtFeld installs them into the
+# plugin-local environment; the code degrades gracefully if they are missing.
+dependencies = [
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+# Blur/quality filtering uses OpenCV when available; falls back to a numpy Laplacian.
+quality = ["opencv-python-headless>=4.6"]
+
+[tool.lichtfeld]
+hot_reload = true
+entry_point = "__init__"
+plugin_api = ">=1,<2"
+lichtfeld_version = ">=0.4.2"
+required_features = []
+
+[project.scripts]
+splatking-import = "splatking.cli:main"

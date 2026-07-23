@@ -1,0 +1,23 @@
+# Plugin runtime / local junk
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+_prep_*/
+*_lichtfeld_prep/
+.splatking_prefs.json
+.DS_Store
+.vscode/
+.pyrightconfig.json
+pyrightconfig.json
+
+# NEVER ship sample captures (multi-GB MOV / depth bins).
+# Keep locally next to the repo if you want; GitHub install must not clone them.
+spaltking_pack/
+**/spaltking_pack/
+*.mov
+*.MOV
+
+# Leftover empty dir if an IDE had the old path locked during the root move
+_DELETE_ME_empty_splatking_importer/
+splatking_importer/
