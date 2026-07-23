@@ -20,10 +20,9 @@ Repo root **is** the plugin (`pyproject.toml` + `__init__.py`), so Studio can in
 ```python
 import lichtfeld as lf
 
-# After you push this repo:
-lf.plugins.install("YOUR_GITHUB_USER/spaltking-lichtfeld")
+lf.plugins.install("mnrnnn/spaltking-lichtfeld-plugin")
 # or
-lf.plugins.install("https://github.com/YOUR_GITHUB_USER/spaltking-lichtfeld")
+lf.plugins.install("https://github.com/mnrnnn/spaltking-lichtfeld-plugin")
 ```
 
 In the Studio UI: **Plugins → Install from Git** → paste the same URL.
@@ -31,12 +30,12 @@ In the Studio UI: **Plugins → Install from Git** → paste the same URL.
 Manual clone (folder name should match the plugin `name` in `pyproject.toml`):
 
 ```powershell
-git clone https://github.com/YOUR_GITHUB_USER/spaltking-lichtfeld.git `
+git clone https://github.com/mnrnnn/spaltking-lichtfeld-plugin.git `
   "$env:USERPROFILE\.lichtfeld\plugins\splatking_importer"
 ```
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/spaltking-lichtfeld.git \
+git clone https://github.com/mnrnnn/spaltking-lichtfeld-plugin.git \
   ~/.lichtfeld/plugins/splatking_importer
 ```
 
