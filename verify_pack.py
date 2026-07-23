@@ -17,12 +17,19 @@ import tempfile
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from splatking.pack import detect_capture_type, load_pack, CaptureType, load_lidar_frame_metadata
-from splatking.intrinsics import colmap_camera_from_device, pinhole_from_fov
+from splatking.pack import (
+    detect_capture_type,
+    load_pack,
+    CaptureType,
+    load_lidar_frame_metadata,
+    default_out_dir,
+)
+from splatking.intrinsics import colmap_camera_from_device, pinhole_from_fov, fov_from_focal_35mm
 from splatking.colmap_model import read_model, find_sparse_dir
 from splatking.camera_select import CameraSelectOptions, subsample_model
 from splatking.lidar_pipeline import LidarPrepOptions, prepare_lidar_dataset
 from splatking.video_pipeline import VideoPrepOptions, prepare_video_dataset
+from splatking.photo_pipeline import PhotoPrepOptions, prepare_photo_dataset
 
 
 def _pack_root() -> str:
@@ -42,7 +49,6 @@ def _pack_root() -> str:
 def check_video(pack_root: str):
     path = os.path.join(pack_root, "3_video")
     if not os.path.isdir(path):
-        # Allow pointing SPALTKING_PACK directly at a video_dual folder.
         if detect_capture_type(pack_root) == CaptureType.VIDEO_DUAL:
             path = pack_root
         else:
@@ -57,9 +63,12 @@ def check_video(pack_root: str):
     fx_u, _, _, _ = pinhole_from_fov(3840, 2160, 106.20069885253906)
     assert abs(wide.params[0] - fx_w) < 1e-3
     assert abs(ultra.params[0] - fx_u) < 1e-3
-    assert wide.params[0] > ultra.params[0]  # narrower FOV → longer focal
+    assert wide.params[0] > ultra.params[0]
     print(f"[video] wide fx={wide.params[0]:.2f}  ultra fx={ultra.params[0]:.2f}")
     print(f"[video] frames wide={pack.stream('wide').frame_count} ultra={pack.stream('ultra').frame_count}")
+    assert default_out_dir(path, CaptureType.VIDEO_DUAL).endswith(
+        os.path.join("Output", "video_prep")
+    )
 
     with tempfile.TemporaryDirectory() as td:
         opts = VideoPrepOptions(
@@ -75,6 +84,57 @@ def check_video(pack_root: str):
         assert len(result.cameras) == 2
         assert "wide" in result.extracted and "ultra" in result.extracted
         print(f"[video] dry-run kept={[len(v) for v in result.extracted.values()]} cmds={len(result.commands)}")
+
+
+def check_photo(pack_root: str):
+    path = os.path.join(pack_root, "2_photo")
+    if not os.path.isdir(path):
+        if detect_capture_type(pack_root) == CaptureType.PHOTO_DUAL:
+            path = pack_root
+        else:
+            print(f"[skip] photo sample not found: {path}")
+            return
+    assert detect_capture_type(path) == CaptureType.PHOTO_DUAL, detect_capture_type(path)
+    # Must not be misclassified as LiDAR despite photo_series.json
+    assert detect_capture_type(path) != CaptureType.PHOTO_LIDAR_SINGLE
+    pack = load_pack(path)
+    assert pack.pair_count >= 1
+    assert "wide" in pack.cameras and "ultra" in pack.cameras
+    wide_dev = pack.representative_device("wide")
+    ultra_dev = pack.representative_device("ultra")
+    assert wide_dev and ultra_dev
+    wide = colmap_camera_from_device(wide_dev, 1)
+    ultra = colmap_camera_from_device(ultra_dev, 2)
+    assert wide.params[0] > ultra.params[0]
+    # Sanity: FOV from 35mm equiv is in a plausible range
+    assert 60 < wide_dev.field_of_view < 90
+    assert 90 < ultra_dev.field_of_view < 130
+    print(
+        f"[photo] pairs={pack.pair_count} frames={len(pack.frames)} "
+        f"wide fx={wide.params[0]:.2f} FOV={wide_dev.field_of_view:.1f} "
+        f"ultra fx={ultra.params[0]:.2f} FOV={ultra_dev.field_of_view:.1f}"
+    )
+    assert abs(fov_from_focal_35mm(25) - 71.51) < 1.0
+
+    with tempfile.TemporaryDirectory() as td:
+        result = prepare_photo_dataset(
+            pack,
+            PhotoPrepOptions(
+                out_dir=td,
+                cameras=["wide", "ultra"],
+                blur_percentile=0.0,
+                inject_intrinsics=True,
+                run_colmap=False,
+            ),
+            dry_run=False,
+        )
+        assert len(result.cameras) == 2
+        assert result.extracted.get("wide") and result.extracted.get("ultra")
+        assert os.path.isfile(os.path.join(td, "run_colmap.bat"))
+        print(
+            f"[photo] kept wide={len(result.extracted['wide'])} "
+            f"ultra={len(result.extracted['ultra'])} cmds={len(result.commands)}"
+        )
 
 
 def check_lidar(pack_root: str):
@@ -118,6 +178,7 @@ def check_lidar(pack_root: str):
 def main():
     pack_root = _pack_root()
     print(f"using pack root: {pack_root}")
+    check_photo(pack_root)
     check_video(pack_root)
     check_lidar(pack_root)
     print("OK")

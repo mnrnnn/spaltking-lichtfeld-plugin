@@ -18,6 +18,9 @@ spaltking_pack/
 *.mov
 *.MOV
 
+# Downloaded deps (vocab tree etc.) — not in the GitHub plugin package
+.splatking_data/
+
 # Leftover empty dir if an IDE had the old path locked during the root move
 _DELETE_ME_empty_splatking_importer/
 splatking_importer/

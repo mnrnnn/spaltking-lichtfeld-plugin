@@ -100,6 +100,58 @@ def colmap_camera_from_device(
     )
 
 
+def fov_from_focal_35mm(focal_35mm: float) -> float:
+    """Horizontal FOV (degrees) for a full-frame camera with the given 35mm-eq focal.
+
+    Uses the 36mm full-frame sensor width: ``2 * atan(36 / (2 * f))``.
+    """
+    if focal_35mm <= 0.0:
+        raise ValueError(f"Implausible 35mm focal length: {focal_35mm}")
+    return 2.0 * math.degrees(math.atan(36.0 / (2.0 * focal_35mm)))
+
+
+def device_from_exif_35mm(camera: str, exif: dict) -> "DeviceInfo":
+    """Build a DeviceInfo from still EXIF (FocalLenIn35mmFilm + pixel size)."""
+    from .pack import DeviceInfo
+
+    width = int(exif.get("PixelXDimension") or exif.get("PixelWidth") or 0)
+    height = int(exif.get("PixelYDimension") or exif.get("PixelHeight") or 0)
+    f35 = float(exif.get("FocalLenIn35mmFilm") or 0.0)
+    fov = fov_from_focal_35mm(f35) if f35 > 0 else 0.0
+    # Known iPhone dual-lens fallbacks when EXIF lacks 35mm equivalent.
+    if fov <= 0.0:
+        fov = 74.6 if camera == "wide" else 106.2 if camera == "ultra" else 70.0
+    if width <= 0 or height <= 0:
+        width, height = 4224, 2376
+    return DeviceInfo(
+        camera=camera,
+        device_type="exif",
+        localized_name=str(exif.get("LensModel") or camera),
+        width=width,
+        height=height,
+        field_of_view=fov,
+        corrected_field_of_view=fov,
+        distortion_correction_supported=True,
+        distortion_correction_enabled=True,
+        iso=_exif_iso(exif),
+        exposure_seconds=_maybe_float_local(exif.get("ExposureTime")),
+    )
+
+
+def _exif_iso(exif: dict) -> Optional[float]:
+    iso = exif.get("ISOSpeedRatings")
+    if isinstance(iso, (list, tuple)) and iso:
+        return _maybe_float_local(iso[0])
+    return _maybe_float_local(iso)
+
+
+def _maybe_float_local(v) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def colmap_camera_from_arkit_intrinsics(
     intrinsics_col_major: list[float],
     width: int,

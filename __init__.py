@@ -33,6 +33,7 @@ def on_load():
     from .panels.main_panel import SplatKingImporterPanel
     from .operators.prepare_ops import (
         SplatKingPrepareVideoOp,
+        SplatKingPreparePhotoOp,
         SplatKingPrepareLidarOp,
         SplatKingLoadLidarDatasetOp,
         SplatKingSubsampleCamerasOp,
@@ -41,6 +42,7 @@ def on_load():
     CLASSES = [
         SplatKingImporterPanel,
         SplatKingPrepareVideoOp,
+        SplatKingPreparePhotoOp,
         SplatKingPrepareLidarOp,
         SplatKingLoadLidarDatasetOp,
         SplatKingSubsampleCamerasOp,

@@ -83,8 +83,10 @@ class SplatKingPrepareVideoOp(Operator):
             state["status"] = "Error: pick a SplatKing pack folder"
             lf.log.error(state["status"])
             return {"CANCELLED"}
+        from splatking.pack import default_out_dir
+
         if not out_dir:
-            out_dir = os.path.join(pack_path, "_lichtfeld_prep")
+            out_dir = default_out_dir(pack_path, CaptureType.VIDEO_DUAL)
         ct = detect_capture_type(pack_path)
         if ct != CaptureType.VIDEO_DUAL:
             state["status"] = f"Error: expected video_dual, got {ct.value}"
@@ -128,6 +130,89 @@ class SplatKingPrepareVideoOp(Operator):
         return {"FINISHED"}
 
 
+class SplatKingPreparePhotoOp(Operator):
+    label = "Prepare Photo Dataset"
+    description = (
+        "Copy dual-lens stills, filter blur, inject per-camera PINHOLE "
+        "intrinsics from EXIF, and write COLMAP commands."
+    )
+    options = {"BLOCKING"}
+
+    pack_path = StringProperty(name="Pack", subtype=PropSubtype.DIR_PATH, default="")
+    out_dir = StringProperty(name="Output", subtype=PropSubtype.DIR_PATH, default="")
+    cameras = StringProperty(name="Cameras", default="wide,ultra")
+    blur_percentile = FloatProperty(name="Blur drop %", default=0.15, min=0.0, max=0.9)
+    matcher = EnumProperty(
+        name="Matcher",
+        items=[
+            ("sequential", "Sequential", "Good for ordered captures"),
+            ("exhaustive", "Exhaustive", "O(N²) — small sets only"),
+            ("vocab_tree", "Vocab Tree", "Required for thousands of images"),
+        ],
+        default="sequential",
+    )
+    vocab_tree = StringProperty(name="Vocab tree", subtype=PropSubtype.FILE_PATH, default="")
+    inject_intrinsics = BoolProperty(name="Inject known intrinsics", default=True)
+    run_colmap = BoolProperty(name="Run COLMAP now", default=False)
+    colmap_bin = StringProperty(name="COLMAP binary", default="")
+
+    @classmethod
+    def poll(cls, context) -> bool:
+        return True
+
+    def execute(self, context) -> set:
+        import lichtfeld as lf
+        from splatking.pack import load_pack, detect_capture_type, CaptureType, default_out_dir
+        from splatking.photo_pipeline import PhotoPrepOptions, prepare_photo_dataset
+
+        state = _ops_state()
+        pack_path = self.pack_path or state.get("pack_path", "")
+        out_dir = self.out_dir or state.get("out_dir", "")
+        if not pack_path or not os.path.isdir(pack_path):
+            state["status"] = "Error: pick a SplatKing pack folder"
+            lf.log.error(state["status"])
+            return {"CANCELLED"}
+        if not out_dir:
+            out_dir = default_out_dir(pack_path, CaptureType.PHOTO_DUAL)
+        ct = detect_capture_type(pack_path)
+        if ct != CaptureType.PHOTO_DUAL:
+            state["status"] = f"Error: expected photo_dual, got {ct.value}"
+            lf.log.error(state["status"])
+            return {"CANCELLED"}
+
+        _, cm_default = _tool_bins()
+        state["status"] = "Preparing photo dataset..."
+        lf.log.info(state["status"])
+        pack = load_pack(pack_path)
+        opts = PhotoPrepOptions(
+            out_dir=out_dir,
+            cameras=[c.strip() for c in self.cameras.split(",") if c.strip()],
+            blur_percentile=float(self.blur_percentile),
+            matcher=str(self.matcher),
+            vocab_tree_path=str(self.vocab_tree),
+            inject_intrinsics=bool(self.inject_intrinsics),
+            colmap_bin=str(self.colmap_bin) or cm_default,
+            run_colmap=bool(self.run_colmap),
+        )
+        try:
+            result = prepare_photo_dataset(pack, opts)
+        except Exception as e:
+            state["status"] = f"Error: {e}"
+            lf.log.error(state["status"])
+            return {"CANCELLED"}
+
+        kept = {k: len(v) for k, v in result.extracted.items()}
+        state["out_dir"] = result.out_dir
+        state["last_report"] = result.report_path
+        state["capture_type"] = "photo_dual"
+        state["status"] = (
+            f"Photo ready: kept={kept}; injected {len(result.cameras)} cameras; "
+            f"see {result.report_path}"
+        )
+        lf.log.info(state["status"])
+        return {"FINISHED"}
+
+
 class SplatKingPrepareLidarOp(Operator):
     label = "Prepare LiDAR Depth"
     description = (
@@ -165,8 +250,10 @@ class SplatKingPrepareLidarOp(Operator):
             state["status"] = "Error: pick a SplatKing pack folder"
             lf.log.error(state["status"])
             return {"CANCELLED"}
+        from splatking.pack import default_out_dir
+
         if not out_dir:
-            out_dir = os.path.join(pack_path, "_lichtfeld_prep")
+            out_dir = default_out_dir(pack_path, CaptureType.PHOTO_LIDAR_SINGLE)
         ct = detect_capture_type(pack_path)
         if ct != CaptureType.PHOTO_LIDAR_SINGLE:
             state["status"] = f"Error: expected photo_lidar_single, got {ct.value}"

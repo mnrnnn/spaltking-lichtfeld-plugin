@@ -200,13 +200,13 @@ def _ffmpeg_extract(
 
 
 def build_colmap_commands(
-    opts: VideoPrepOptions,
+    opts,  # VideoPrepOptions | PhotoPrepOptions (duck-typed)
     cameras: list[ColmapCamera],
     image_root: str,
     database_path: str,
     sparse_dir: str,
 ) -> list[list[str]]:
-    """Build the COLMAP argv sequence for the video path.
+    """Build the COLMAP argv sequence for video/photo prep.
 
     Feature extraction runs once per lens subfolder so each lens becomes its own
     camera with injected PINHOLE params (the CLI-only per-camera path). Matching

@@ -10,10 +10,14 @@ from .pack import (
     DeviceInfo,
     VideoStream,
     VideoPack,
+    PhotoFrame,
+    PhotoPack,
     LidarPair,
     LidarPack,
     load_pack,
     detect_capture_type,
+    default_out_dir,
+    human_capture_label,
 )
 
 __all__ = [
@@ -21,8 +25,12 @@ __all__ = [
     "DeviceInfo",
     "VideoStream",
     "VideoPack",
+    "PhotoFrame",
+    "PhotoPack",
     "LidarPair",
     "LidarPack",
     "load_pack",
     "detect_capture_type",
+    "default_out_dir",
+    "human_capture_label",
 ]

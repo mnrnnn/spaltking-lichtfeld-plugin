@@ -3,8 +3,8 @@
 Works without LichtFeld Studio installed. Typical large-scale flow::
 
     python -m splatking.cli prepare  path/to/Video_...  --out out/video_prep
+    python -m splatking.cli prepare  path/to/Photo_...  --out out/photo_prep
     python -m splatking.cli prepare  path/to/Lidar_...  --out out/lidar_prep
-    python -m splatking.cli colmap   out/video_prep     # if COLMAP on PATH
     python -m splatking.cli cameras  out/video_prep/sparse/0 --every-n 3
 """
 
@@ -27,7 +27,7 @@ def _add_package_root() -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="splatking-import",
-        description="Prepare SplatKing video/LiDAR packs for LichtFeld / COLMAP.",
+        description="Prepare SplatKing photo/video/LiDAR packs for LichtFeld / COLMAP.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("pack", help="Path to a SplatKing capture folder")
     prep.add_argument("--out", required=True, help="Output directory")
     prep.add_argument("--cameras", default="wide,ultra",
-                      help="Comma-separated lenses for video packs (default: wide,ultra)")
+                      help="Comma-separated lenses for photo/video packs (default: wide,ultra)")
     prep.add_argument("--stride", type=int, default=15, help="Keep every Nth video frame")
     prep.add_argument("--max-frames", type=int, default=200, help="Cap frames per lens (0=unlimited)")
     prep.add_argument("--resize", type=int, default=1920, help="Resize width (0=native)")
@@ -97,6 +97,21 @@ def cmd_info(args: argparse.Namespace) -> int:
             )
         if pack.thermal_fps_events:
             print(f"thermal_throttle_events: {len(pack.thermal_fps_events)}")
+    elif ct == CaptureType.PHOTO_DUAL:
+        print(f"folder: {pack.folder_name}")
+        print(f"pairs: {pack.pair_count}")
+        print(f"frames: {len(pack.frames)}")
+        for cam in pack.cameras:
+            dev = pack.representative_device(cam)
+            n = len(pack.frames_for(cam))
+            if dev:
+                cc = colmap_camera_from_device(dev, 1)
+                print(
+                    f"  {cam}: {n} images, {dev.width}x{dev.height}, "
+                    f"FOV={dev.field_of_view:.2f}°, fx={cc.params[0]:.2f}"
+                )
+            else:
+                print(f"  {cam}: {n} images")
     else:
         print(f"folder: {pack.folder_name}")
         print(f"pairs: {pack.pair_count}")
@@ -113,6 +128,7 @@ def cmd_info(args: argparse.Namespace) -> int:
 def cmd_prepare(args: argparse.Namespace) -> int:
     from splatking.pack import CaptureType, load_pack, detect_capture_type
     from splatking.video_pipeline import VideoPrepOptions, prepare_video_dataset
+    from splatking.photo_pipeline import PhotoPrepOptions, prepare_photo_dataset
     from splatking.lidar_pipeline import LidarPrepOptions, prepare_lidar_dataset
     from splatking.prefs import load_prefs, apply_tool_defaults
 
@@ -127,11 +143,12 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         return 1
     pack = load_pack(args.pack)
     os.makedirs(args.out, exist_ok=True)
+    cams = [c.strip() for c in args.cameras.split(",") if c.strip()]
 
     if ct == CaptureType.VIDEO_DUAL:
         opts = VideoPrepOptions(
             out_dir=args.out,
-            cameras=[c.strip() for c in args.cameras.split(",") if c.strip()],
+            cameras=cams,
             stride=args.stride,
             max_frames_per_lens=args.max_frames,
             resize_width=args.resize,
@@ -153,6 +170,27 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             "report": result.report_path,
             "colmap_commands": len(result.commands),
             "ffmpeg": ffmpeg_bin,
+            "colmap": colmap_bin,
+        }, indent=2))
+    elif ct == CaptureType.PHOTO_DUAL:
+        opts = PhotoPrepOptions(
+            out_dir=args.out,
+            cameras=cams,
+            blur_percentile=args.blur_percentile,
+            matcher=args.matcher,
+            vocab_tree_path=args.vocab_tree or prefs.get("vocab_tree_path", ""),
+            inject_intrinsics=not args.no_inject_intrinsics,
+            colmap_bin=colmap_bin,
+            run_colmap=args.run_colmap,
+        )
+        result = prepare_photo_dataset(pack, opts, dry_run=args.dry_run)
+        print(json.dumps({
+            "out_dir": result.out_dir,
+            "cameras": [c.to_line() for c in result.cameras],
+            "kept": {k: len(v) for k, v in result.extracted.items()},
+            "rejected": {k: len(v) for k, v in result.rejected.items()},
+            "report": result.report_path,
+            "colmap_commands": len(result.commands),
             "colmap": colmap_bin,
         }, indent=2))
     else:
@@ -185,7 +223,6 @@ def cmd_colmap(args: argparse.Namespace) -> int:
         data = json.load(f)
     cmds = []
     for line in data.get("colmap_commands", []):
-        # Rebuild argv from the stored shell-ish strings carefully via shlex.
         import shlex
         argv = shlex.split(line, posix=os.name != "nt")
         if argv and args.colmap_bin and argv[0] == "colmap":
