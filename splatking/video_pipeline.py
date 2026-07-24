@@ -254,22 +254,24 @@ def build_colmap_commands(
             "--image_list_path", os.path.join(image_root, f"_list_{cam}.txt"),
             "--ImageReader.single_camera", "1",
             "--ImageReader.camera_model", "PINHOLE",
-            "--SiftExtraction.use_gpu", "1" if cm.use_gpu else "0",
+            # COLMAP ≥3.13 / 4.x: FeatureExtraction.* (not SiftExtraction.use_gpu)
+            "--FeatureExtraction.use_gpu", "1" if cm.use_gpu else "0",
             "--SiftExtraction.max_num_features", str(int(cm.max_num_features)),
         ]
         if cm.max_image_size and cm.max_image_size > 0:
-            fe += ["--SiftExtraction.max_image_size", str(int(cm.max_image_size))]
+            fe += ["--FeatureExtraction.max_image_size", str(int(cm.max_image_size))]
         cc = cam_by_src.get(cam)
         if inject and cc is not None:
             fe += ["--ImageReader.camera_params", ",".join(f"{p:.9g}" for p in cc.params)]
         cmds.append(fe)
 
+    gpu = "1" if cm.use_gpu else "0"
     if cm.matcher == "exhaustive":
         cmds.append([colmap_bin, "exhaustive_matcher", "--database_path", database_path,
-                      "--SiftMatching.use_gpu", "1" if cm.use_gpu else "0"])
+                      "--FeatureMatching.use_gpu", gpu])
     elif cm.matcher == "vocab_tree":
         m = [colmap_bin, "vocab_tree_matcher", "--database_path", database_path,
-             "--SiftMatching.use_gpu", "1" if cm.use_gpu else "0"]
+             "--FeatureMatching.use_gpu", gpu]
         if cm.vocab_tree_path:
             m += ["--VocabTreeMatching.vocab_tree_path", cm.vocab_tree_path]
         cmds.append(m)
@@ -277,7 +279,7 @@ def build_colmap_commands(
         cmds.append([
             colmap_bin, "sequential_matcher",
             "--database_path", database_path,
-            "--SiftMatching.use_gpu", "1" if cm.use_gpu else "0",
+            "--FeatureMatching.use_gpu", gpu,
             "--SequentialMatching.overlap", str(int(cm.sequential_overlap)),
         ])
 

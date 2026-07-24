@@ -74,7 +74,8 @@ def check_video(pack_root: str):
         assert "wide" in result.extracted and "ultra" in result.extracted
         # ensure short select filter in commands path exists via build
         assert any("feature_extractor" in " ".join(c) for c in result.commands)
-        assert any("SiftExtraction.use_gpu" in " ".join(c) for c in result.commands)
+        assert any("FeatureExtraction.use_gpu" in " ".join(c) for c in result.commands)
+        assert any("FeatureMatching.use_gpu" in " ".join(c) for c in result.commands)
         print(f"[video] dry-run kept={[len(v) for v in result.extracted.values()]} cmds={len(result.commands)}")
 
 

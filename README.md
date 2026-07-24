@@ -11,7 +11,7 @@ import lichtfeld as lf
 lf.plugins.install("mnrnnn/spaltking-lichtfeld-plugin")
 ```
 
-Requirements: `numpy`. Optional: `opencv-python-headless`. Host needs `ffmpeg` for video; `colmap` optional for Prepare (still writes `run_colmap.bat`). Windows: **Install missing** (winget) + **Download vocab tree** (~15MB).
+Requirements: `numpy`. Optional: `opencv-python-headless`. Host needs `ffmpeg` for video; **COLMAP ≥3.13** (4.x OK, e.g. 4.1.0) for SfM. Windows: **Install missing** (winget) + **Download vocab tree** (~15MB).
 
 ## Pack shapes
 
@@ -19,23 +19,26 @@ Requirements: `numpy`. Optional: `opencv-python-headless`. Host needs `ffmpeg` f
 - **`video_dual`** — `wide.mov` + `ultra.mov` + metadata  
 - **`photo_lidar_single`** — `COLMAP_Text_Model/` + depth bins  
 
-## Studio panel (v0.2.2)
+## Studio panel (v0.2.3)
 
 1. **Browse** pack / optional **Base Output** (default `{pack}/Output/{photo|video|lidar}_prep`)  
-2. **Tools** — ffmpeg / COLMAP / vocab  
-3. **Photo** / **Video** — prepare dataset; video uses **Keep frames %** + **Resize** (independent)  
-4. **Run COLMAP** — matcher + SIFT/mapper params; **Run COLMAP now** on prep dir  
-5. Photo/Video **Run COLMAP after prepare** uses the **Run COLMAP section** settings  
+2. **Tools** — ffmpeg / COLMAP / vocab (+ Browse next to each path)  
+3. **Photo** / **Video** — prepare dataset; video uses **Keep %** + **Resize** (independent); jobs run in a **background thread** so the progress bar updates  
+4. **Run COLMAP** — matcher + SIFT/mapper params; Prep dir **Browse**; **Run COLMAP now**  
+5. Photo/Video **After prepare** uses the **Run COLMAP section** settings  
 6. LiDAR / Training cameras / Status + progress bar  
 
 ### COLMAP defaults (keep in sync when changing code)
 
-Documented defaults for the **Run COLMAP** section / `ColmapSettings`:
+Documented defaults for the **Run COLMAP** section / `ColmapSettings`.
+
+**Recommended COLMAP: 3.13+ (CUDA), 4.x included (e.g. 4.1.0).**  
+GPU flags are `FeatureExtraction` / `FeatureMatching`. COLMAP ≤3.12 used `SiftExtraction` / `SiftMatching.use_gpu`; with this plugin (v0.2.3+) upgrade to ≥3.13, or edit generated `run_colmap.bat` back to the old names.
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `SiftExtraction.use_gpu` | **ON** (`1`) | Also applied to SiftMatching |
-| `SiftExtraction.max_image_size` | **3200** | `0` = unlimited |
+| `FeatureExtraction.use_gpu` | **ON** (`1`) | Also `FeatureMatching.use_gpu` |
+| `FeatureExtraction.max_image_size` | **3200** | `0` = unlimited |
 | `SiftExtraction.max_num_features` | **8192** | |
 | `SequentialMatching.overlap` | **10** | sequential matcher only |
 | `Mapper.min_num_matches` | **15** | |
