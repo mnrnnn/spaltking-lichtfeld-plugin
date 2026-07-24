@@ -104,6 +104,7 @@ def check_photo(pack_root: str):
                 blur_percentile=0.0,
                 inject_intrinsics=True,
                 run_colmap=False,
+                write_colmap_script=True,
                 colmap=ColmapSettings(matcher="sequential", sequential_overlap=10),
             ),
             dry_run=False,

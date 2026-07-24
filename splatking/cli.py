@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--vocab-tree", default="")
     prep.add_argument("--no-inject-intrinsics", action="store_true")
     prep.add_argument("--run-colmap", action="store_true")
+    prep.add_argument(
+        "--write-colmap-script",
+        action="store_true",
+        help="Write run_colmap.bat / .sh (off by default)",
+    )
     prep.add_argument("--colmap-bin", default="colmap")
     prep.add_argument("--ffmpeg-bin", default="ffmpeg")
     prep.add_argument("--confidence-min", type=int, default=1)
@@ -47,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--max-num-features", type=int, default=8192)
     prep.add_argument("--seq-overlap", type=int, default=10)
     prep.add_argument("--min-num-matches", type=int, default=15)
+    prep.add_argument("--no-dual", action="store_true", help="Disable dual-lens merge")
+    prep.add_argument("--base-lens", choices=["ultra", "wide"], default="ultra")
+    prep.add_argument(
+        "--dual-method",
+        choices=["auto", "registrator", "rig", "wide_only"],
+        default="auto",
+    )
 
     col = sub.add_parser("colmap", help="Run COLMAP on a prep out-dir")
     col.add_argument("prep_dir", help="Directory produced by `prepare`")
@@ -59,6 +71,18 @@ def build_parser() -> argparse.ArgumentParser:
     col.add_argument("--max-num-features", type=int, default=8192)
     col.add_argument("--seq-overlap", type=int, default=10)
     col.add_argument("--min-num-matches", type=int, default=15)
+    col.add_argument("--no-dual", action="store_true")
+    col.add_argument("--base-lens", choices=["ultra", "wide"], default="ultra")
+    col.add_argument(
+        "--dual-method",
+        choices=["auto", "registrator", "rig", "wide_only"],
+        default="auto",
+    )
+    col.add_argument(
+        "--write-colmap-script",
+        action="store_true",
+        help="Write run_colmap.bat / .sh (off by default)",
+    )
 
     cam = sub.add_parser("cameras", help="Subsample registered cameras for training")
     cam.add_argument("sparse_dir")
@@ -86,6 +110,9 @@ def _colmap_settings_from_args(args, prefs) -> "ColmapSettings":
         max_num_features=int(getattr(args, "max_num_features", 8192)),
         sequential_overlap=int(getattr(args, "seq_overlap", 10)),
         min_num_matches=int(getattr(args, "min_num_matches", 15)),
+        dual_mode=not getattr(args, "no_dual", False),
+        base_lens=getattr(args, "base_lens", "ultra") or "ultra",
+        dual_method=getattr(args, "dual_method", "auto") or "auto",
     )
 
 
@@ -158,6 +185,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             colmap_bin=colmap_bin,
             ffmpeg_bin=ffmpeg_bin,
             run_colmap=args.run_colmap,
+            write_colmap_script=bool(args.write_colmap_script),
             colmap=settings,
         )
         result = prepare_video_dataset(pack, opts, dry_run=args.dry_run)
@@ -175,6 +203,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             inject_intrinsics=not args.no_inject_intrinsics,
             colmap_bin=colmap_bin,
             run_colmap=args.run_colmap,
+            write_colmap_script=bool(args.write_colmap_script),
             colmap=settings,
         )
         result = prepare_photo_dataset(pack, opts, dry_run=args.dry_run)
@@ -206,7 +235,13 @@ def cmd_colmap(args: argparse.Namespace) -> int:
     colmap_bin = args.colmap_bin if args.colmap_bin != "colmap" else (prefs.get("colmap_bin") or "colmap")
     settings = _colmap_settings_from_args(args, prefs)
     print(f"running COLMAP in {args.prep_dir}...")
-    cmds = run_colmap_on_prep(args.prep_dir, colmap_bin, settings, on_progress=print)
+    cmds = run_colmap_on_prep(
+        args.prep_dir,
+        colmap_bin,
+        settings,
+        write_colmap_script=bool(args.write_colmap_script),
+        on_progress=print,
+    )
     print(f"done ({len(cmds)} steps)")
     return 0
 

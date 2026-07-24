@@ -128,7 +128,7 @@ def install_missing_tools(
             messages.append(
                 "COLMAP is not on winget for this PC. Install from "
                 "https://github.com/colmap/colmap/releases then Browse to colmap.exe "
-                "(Prepare still writes run_colmap.bat without it)."
+                "(Prepare works without it; enable Write .bat/.sh only if needed)."
             )
 
     ff = resolve_ffmpeg(ff.path if ff.found else ffmpeg_saved)

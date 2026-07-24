@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import traceback
 
@@ -49,6 +50,8 @@ class SplatKingImporterPanel(lf.ui.Panel):
             "colmap": False,
             "lidar": False,
             "train": False,
+            "results": True,
+            "status": True,
         }
         self._last_capture_type = None
 
@@ -60,6 +63,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
         self._lens_idx = self._lens_items.index(lenses) if lenses in self._lens_items else 0
         self._inject = bool(prefs.get("video_inject_intrinsics", True))
         self._run_colmap = bool(prefs.get("video_run_colmap", False))
+        self._write_colmap_script = bool(prefs.get("write_colmap_script", False))
 
         self._matcher_items = ["sequential", "exhaustive", "vocab_tree"]
         matcher = prefs.get("colmap_matcher", "sequential")
@@ -71,6 +75,17 @@ class SplatKingImporterPanel(lf.ui.Panel):
         self._colmap_max_num_features = int(prefs.get("colmap_max_num_features", 8192))
         self._colmap_seq_overlap = int(prefs.get("colmap_seq_overlap", 10))
         self._colmap_min_num_matches = int(prefs.get("colmap_min_num_matches", 15))
+        self._dual_mode = bool(prefs.get("colmap_dual_mode", True))
+        self._base_lens_items = ["ultra", "wide"]
+        bl = prefs.get("colmap_base_lens", "ultra")
+        self._base_lens_idx = (
+            self._base_lens_items.index(bl) if bl in self._base_lens_items else 0
+        )
+        self._dual_method_items = ["auto", "registrator", "rig", "wide_only"]
+        dm = prefs.get("colmap_dual_method", "auto")
+        self._dual_method_idx = (
+            self._dual_method_items.index(dm) if dm in self._dual_method_items else 0
+        )
 
         self._confidence_min = int(prefs.get("lidar_confidence_min", 1))
 
@@ -110,14 +125,87 @@ class SplatKingImporterPanel(lf.ui.Panel):
             max_num_features=int(self._colmap_max_num_features),
             sequential_overlap=int(self._colmap_seq_overlap),
             min_num_matches=int(self._colmap_min_num_matches),
+            dual_mode=bool(self._dual_mode),
+            base_lens=self._base_lens_items[self._base_lens_idx],
+            dual_method=self._dual_method_items[self._dual_method_idx],
         )
 
-    def _set_progress(self, frac: float, label: str = ""):
+    # [1/4] COLMAP Feature Extractor (wide) (100/200, 50%)
+    _COLMAP_BAR_RE = re.compile(
+        r"^\[(\d+)/(\d+)\]\s+(.*?)(?:\s+\((\d+)/(\d+),\s*(\d+)%\))?\s*$"
+    )
+
+    @staticmethod
+    def _short_progress_label(msg: str, limit: int = 96) -> str:
+        """Overlay text for the progress bar."""
+        text = (msg or "").strip().replace("\n", " ")
+        if not text:
+            return ""
+        # Preferred COLMAP bar format — show in full (do not path-truncate).
+        if text.startswith("[") and "COLMAP" in text:
+            return text if len(text) <= 120 else text[:119] + "…"
+        if text.startswith("COLMAP ["):
+            if ".bat" not in text.lower() and ".exe" not in text.lower() and "--" not in text:
+                return text
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 1)] + "…"
+
+    def _append_status_log(self, msg: str, *, limit: int = 48):
+        """CLI-style Status log. Coalesce progress ticks for the same [i/n] step."""
+        text = (msg or "").strip()
+        if not text:
+            return
+        if len(text) > 220:
+            text = text[:219] + "…"
+        state = _ops_state()
+        log = list(state.get("status_log") or [])
+        if log and log[-1] == text:
+            state["status"] = text
+            return
+        # Replace last line when same COLMAP step progress updates (CLI feel).
+        bare = text.replace(" done", "").strip()
+        m_new = self._COLMAP_BAR_RE.match(bare)
+        if m_new and log:
+            m_old = self._COLMAP_BAR_RE.match(log[-1].replace(" done", "").strip())
+            if (
+                m_old
+                and m_old.group(1) == m_new.group(1)
+                and m_old.group(2) == m_new.group(2)
+                and m_old.group(3) == m_new.group(3)
+            ):
+                log[-1] = text
+                state["status_log"] = log
+                state["status"] = text
+                return
+        log.append(text)
+        if len(log) > limit:
+            log = log[-limit:]
+        state["status_log"] = log
+        state["status"] = text
+
+    def _append_result_line(self, msg: str, *, limit: int = 32):
+        text = (msg or "").strip()
+        if not text:
+            return
+        if len(text) > 260:
+            text = text[:259] + "…"
+        state = _ops_state()
+        lines = list(state.get("result_lines") or [])
+        if lines and lines[-1] == text:
+            return
+        lines.append(text)
+        if len(lines) > limit:
+            lines = lines[-limit:]
+        state["result_lines"] = lines
+
+    def _set_progress(self, frac: float, label: str = "", *, log: bool = True):
         state = _ops_state()
         state["progress"] = min(max(float(frac), 0.0), 1.0)
         if label:
-            state["progress_label"] = label
-            self._set_status(label)
+            state["progress_label"] = self._short_progress_label(label)
+            if log:
+                self._append_status_log(label)
 
     def _header(self, ui, title: str, key: str) -> bool:
         """Draw collapsing header and keep open state across frames / combo edits."""
@@ -141,7 +229,10 @@ class SplatKingImporterPanel(lf.ui.Panel):
         if self._busy:
             return
         self._busy = True
-        self._set_progress(0.0, label)
+        state = _ops_state()
+        state["status_log"] = []
+        state["result_lines"] = []
+        self._set_progress(0.02, label)
 
         def runner():
             try:
@@ -221,12 +312,16 @@ class SplatKingImporterPanel(lf.ui.Panel):
             "video_inject_intrinsics": self._inject,
             "video_run_colmap": self._run_colmap,
             "video_lenses": self._lens_items[self._lens_idx],
+            "write_colmap_script": self._write_colmap_script,
             "colmap_matcher": self._matcher_items[self._matcher_idx],
             "colmap_use_gpu": self._colmap_use_gpu,
             "colmap_max_image_size": self._colmap_max_image_size,
             "colmap_max_num_features": self._colmap_max_num_features,
             "colmap_seq_overlap": self._colmap_seq_overlap,
             "colmap_min_num_matches": self._colmap_min_num_matches,
+            "colmap_dual_mode": self._dual_mode,
+            "colmap_base_lens": self._base_lens_items[self._base_lens_idx],
+            "colmap_dual_method": self._dual_method_items[self._dual_method_idx],
             "lidar_confidence_min": self._confidence_min,
             "cam_mode": self._cam_modes[self._cam_mode_idx],
             "cam_every_n": self._every_n,
@@ -259,7 +354,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
             self._colmap_status = f"OK ({cm.source})" + (f" — {cm.version}" if cm.version else "")
         else:
             self._colmap_status = (
-                "Not found — Install missing or Browse (Prepare still writes run_colmap.bat)"
+                "Not found — Install missing or Browse under Tools"
             )
         if self._vocab_tree and os.path.isfile(self._vocab_tree):
             self._vocab_status = f"OK — {os.path.basename(self._vocab_tree)}"
@@ -343,34 +438,90 @@ class SplatKingImporterPanel(lf.ui.Panel):
         self._start_bg(work, label="Downloading vocab tree...")
 
     def _set_status(self, msg: str, error: bool = False):
-        state = _ops_state()
-        state["status"] = msg
+        self._append_status_log(msg)
         if error:
             lf.log.error(msg)
         else:
             lf.log.info(msg)
 
-    def _on_progress(self, msg: str):
+    def _on_progress(
+        self,
+        msg: str,
+        status: bool = True,
+        frac: float | None = None,
+        result: bool = False,
+    ):
         state = _ops_state()
+        if result:
+            self._append_result_line(msg)
+            if frac is not None:
+                state["progress"] = min(max(float(frac), 0.0), 1.0)
+            return
+        if frac is not None:
+            self._set_progress(float(frac), msg, log=bool(status))
+            return
         if self._busy:
             cur = float(state.get("progress", 0.0))
             if cur < 0.95:
                 state["progress"] = min(cur + 0.02, 0.95)
-            state["progress_label"] = msg
-        self._set_status(msg)
+            state["progress_label"] = self._short_progress_label(msg)
+        if status:
+            self._append_status_log(msg)
 
-    def _stage_progress(self, msg: str):
-        low = msg.lower()
+    def _stage_progress(
+        self,
+        msg: str,
+        status: bool = True,
+        frac: float | None = None,
+        result: bool = False,
+    ):
+        text = (msg or "").strip()
+        low = text.lower()
+
+        if result:
+            self._append_result_line(text)
+            if frac is not None:
+                _ops_state()["progress"] = min(max(float(frac), 0.0), 1.0)
+            return
+
+        # Preferred: pipeline-supplied overall fraction + bar label.
+        if frac is not None and text.startswith("["):
+            self._set_progress(float(frac), text, log=bool(status))
+            return
+
+        # [1/4] COLMAP Feature Extractor (wide) (100/200, 50%)
+        m = self._COLMAP_BAR_RE.match(text.replace(" done", "").strip())
+        if m:
+            i = max(int(m.group(1)), 1)
+            n = max(int(m.group(2)), 1)
+            cur_s, tot_s = m.group(4), m.group(5)
+            if cur_s and tot_s:
+                cur, total = int(cur_s), max(int(tot_s), 1)
+                overall = (i - 1) / n + (cur / total) / n
+                # CLI Status: coalesce ticks for same step; always update bar.
+                self._set_progress(overall, text, log=bool(status))
+            else:
+                self._set_progress((i - 1) / n, text, log=bool(status))
+            return
+
+        # Legacy: COLMAP [i/n] ...
+        m2 = re.match(r"COLMAP \[(\d+)/(\d+)\]", text)
+        if m2:
+            i = max(int(m2.group(1)), 1)
+            n = max(int(m2.group(2)), 1)
+            self._set_progress((i - 1) / n, text, log=bool(status))
+            return
+
         if "extracting" in low or "ffmpeg" in low or "copying" in low:
-            self._set_progress(0.2, msg)
+            self._set_progress(0.2, text)
         elif "scoring" in low or "sharpness" in low:
-            self._set_progress(0.45, msg)
+            self._set_progress(0.45, text)
         elif "wrote colmap" in low:
-            self._set_progress(0.72, msg)
-        elif "running colmap" in low or msg.startswith("COLMAP ["):
-            self._set_progress(0.85, msg)
+            self._set_progress(0.72, text)
+        elif "running colmap" in low:
+            self._set_progress(0.75, text)
         else:
-            self._on_progress(msg)
+            self._on_progress(text, status=status, frac=frac)
 
     def _browse_folder(self, title: str, start: str = "") -> str:
         try:
@@ -653,6 +804,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
         blur = float(self._blur_pct)
         inject = bool(self._inject)
         run_cm = bool(self._run_colmap)
+        write_script = bool(self._write_colmap_script)
         colmap_bin = self._colmap_bin or "colmap"
         ffmpeg_bin = self._ffmpeg_bin or "ffmpeg"
         colmap_settings = self._colmap_settings()
@@ -677,6 +829,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                     colmap_bin=colmap_bin,
                     ffmpeg_bin=ffmpeg_bin,
                     run_colmap=run_cm,
+                    write_colmap_script=write_script,
                     colmap=colmap_settings,
                 ),
                 on_progress=self._stage_progress,
@@ -685,12 +838,17 @@ class SplatKingImporterPanel(lf.ui.Panel):
             dropped = {k: len(v) for k, v in result.rejected.items()}
             state["last_report"] = result.report_path
             state["capture_type"] = "video_dual"
-            script = os.path.join(result.out_dir, "run_colmap.bat")
             self._set_progress(1.0, "Video prepare finished.")
+            if run_cm:
+                next_hint = "COLMAP ran."
+            elif write_script:
+                next_hint = f"Next: run {os.path.join(result.out_dir, 'run_colmap.bat')}"
+            else:
+                next_hint = "Next: Run COLMAP section."
             self._set_status(
                 f"Done. Kept {kept} (blur-dropped {dropped}). "
                 f"Intrinsics injected for {len(result.cameras)} cameras. "
-                f"{'COLMAP ran.' if run_cm else f'Next: run {script}'}"
+                f"{next_hint}"
             )
 
         self._start_bg(work, label="Preparing video dataset...")
@@ -740,6 +898,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
         blur = float(self._blur_pct)
         inject = bool(self._inject)
         run_cm = bool(self._run_colmap)
+        write_script = bool(self._write_colmap_script)
         colmap_bin = self._colmap_bin or "colmap"
         colmap_settings = self._colmap_settings()
 
@@ -754,6 +913,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                     inject_intrinsics=inject,
                     colmap_bin=colmap_bin,
                     run_colmap=run_cm,
+                    write_colmap_script=write_script,
                     colmap=colmap_settings,
                 ),
                 on_progress=self._stage_progress,
@@ -762,11 +922,15 @@ class SplatKingImporterPanel(lf.ui.Panel):
             dropped = {k: len(v) for k, v in result.rejected.items()}
             state["last_report"] = result.report_path
             state["capture_type"] = "photo_dual"
-            script = os.path.join(result.out_dir, "run_colmap.bat")
             self._set_progress(1.0, "Photo prepare finished.")
+            if run_cm:
+                next_hint = "COLMAP ran."
+            elif write_script:
+                next_hint = f"Next: run {os.path.join(result.out_dir, 'run_colmap.bat')}"
+            else:
+                next_hint = "Next: Run COLMAP section."
             self._set_status(
-                f"Photo ready. Kept {kept} (blur-dropped {dropped}). "
-                f"{'COLMAP ran.' if run_cm else f'Next: run {script}'}"
+                f"Photo ready. Kept {kept} (blur-dropped {dropped}). {next_hint}"
             )
 
         self._start_bg(work, label="Preparing photo dataset...")
@@ -818,6 +982,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
             else None
         )
         inject = bool(self._inject)
+        write_script = bool(self._write_colmap_script)
 
         def work():
             run_colmap_on_prep(
@@ -826,6 +991,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 colmap_settings,
                 cameras=cameras,
                 inject_intrinsics=inject,
+                write_colmap_script=write_script,
                 on_progress=self._stage_progress,
             )
             sparse = os.path.join(prep_dir, "sparse", "0")
@@ -1056,7 +1222,7 @@ class SplatKingImporterPanel(lf.ui.Panel):
                     self._colmap_bin = picked
                     self._refresh_tool_status()
                     self._save_prefs()
-            self._hint(ui, "Optional for Prepare: without COLMAP we still write run_colmap.bat")
+            self._hint(ui, "COLMAP optional for Prepare; required for Run COLMAP / After prepare.")
             self._hint(
                 ui,
                 "Recommended COLMAP ≥3.13 (4.x OK). GPU flags: FeatureExtraction/FeatureMatching.",
@@ -1100,8 +1266,8 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 ui.text_disabled("Browse a photo_dual pack to enable this section.")
             else:
                 ui.text_wrapped(
-                    "Dual-lens stills need SfM. Copies images, injects PINHOLE "
-                    "intrinsics from EXIF, writes run_colmap.bat."
+                    "Dual-lens stills need SfM. Copies images and injects PINHOLE "
+                    "intrinsics from EXIF."
                 )
                 changed, self._lens_idx = ui.combo(
                     "Lenses##photo", self._lens_idx, self._lens_items
@@ -1219,8 +1385,31 @@ class SplatKingImporterPanel(lf.ui.Panel):
                 "Min matches##colmap", self._colmap_min_num_matches, 2, 100
             )
             self._hint(ui, "Mapper.min_num_matches.")
+            changed, self._dual_mode = ui.checkbox(
+                "Dual-lens merge##colmap", self._dual_mode
+            )
+            self._hint(
+                ui,
+                "wide+ultra → single sparse (registrator → rig → wide-only). Off = legacy.",
+            )
+            if self._dual_mode:
+                changed, self._base_lens_idx = ui.combo(
+                    "Base lens##colmap", self._base_lens_idx, self._base_lens_items
+                )
+                self._hint(ui, "Skeleton for Path1 (default ultra = wider FOV).")
+                changed, self._dual_method_idx = ui.combo(
+                    "Dual method##colmap", self._dual_method_idx, self._dual_method_items
+                )
+                self._hint(ui, "auto tries registrator, then rig, then wide-only.")
             if self._matcher_items[self._matcher_idx] == "vocab_tree":
                 ui.text_disabled("Vocab tree path is set under Tools.")
+            changed, self._write_colmap_script = ui.checkbox(
+                "Write .bat/.sh##colmap", self._write_colmap_script
+            )
+            self._hint(
+                ui,
+                "Opt-in: also write run_colmap.bat / .sh (offline recipe; does not resume).",
+            )
             if not self._busy:
                 if ui.button_styled("Run COLMAP now##colmap", "primary"):
                     self._run_colmap_only()
@@ -1271,18 +1460,50 @@ class SplatKingImporterPanel(lf.ui.Panel):
             if ui.button("Write training subset (sparse/0_train)##train"):
                 self._run_subsample()
 
+        # Footer: Results (per-step summaries) + Status (CLI live) + progress.
         ui.separator()
-        ui.label("Status##sk_status")
-        status = state.get("status", "Idle")
-        if status.lower().startswith("error") or "failed" in status.lower():
-            ui.text_colored(status, (0.95, 0.45, 0.4, 1.0))
-        elif status != "Idle":
-            ui.text_colored(status, (0.55, 0.85, 0.55, 1.0))
-        else:
-            ui.text_disabled("Idle — Browse a pack to begin")
-        if state.get("last_report"):
-            ui.text_disabled(state["last_report"])
+        if self._header(ui, "Results##sk_results", "results"):
+            results = list(state.get("result_lines") or [])
+            if not results:
+                ui.text_disabled(
+                    "Per-step summaries (keypoints, verified pairs, sparse model) "
+                    "appear here when each COLMAP stage finishes."
+                )
+            else:
+                for line in results:
+                    if hasattr(ui, "bullet_text"):
+                        ui.bullet_text(line)
+                    else:
+                        ui.text_wrapped(line)
+
+        if self._header(ui, "Status##sk_status", "status"):
+            log = list(state.get("status_log") or [])
+            status = state.get("status", "Idle") or "Idle"
+            if not log:
+                if status.lower().startswith("error") or "failed" in status.lower():
+                    ui.text_colored(status, (0.95, 0.45, 0.4, 1.0))
+                elif status != "Idle":
+                    ui.text_colored(status, (0.55, 0.85, 0.55, 1.0))
+                else:
+                    ui.text_disabled("Idle — Browse a pack to begin")
+            else:
+                # CLI-style: older lines muted; newest line = current step.
+                for line in log[-20:-1]:
+                    if hasattr(ui, "text_disabled"):
+                        ui.text_disabled(line)
+                    else:
+                        ui.text_wrapped(line)
+                cur_line = log[-1]
+                low = cur_line.lower()
+                if low.startswith("error") or "failed" in low:
+                    ui.text_colored(cur_line, (0.95, 0.45, 0.4, 1.0))
+                else:
+                    ui.text_colored(cur_line, (0.55, 0.85, 0.55, 1.0))
+            if state.get("last_report"):
+                ui.text_disabled(state["last_report"])
 
         progress = float(state.get("progress", 0.0))
-        if progress > 0 or self._busy:
-            ui.progress_bar(progress, overlay=state.get("progress_label", ""))
+        if self._busy or progress > 0:
+            overlay = state.get("progress_label", "") or ("Working..." if self._busy else "")
+            shown = max(progress, 0.02) if self._busy and progress < 0.02 else progress
+            ui.progress_bar(shown, overlay=overlay)

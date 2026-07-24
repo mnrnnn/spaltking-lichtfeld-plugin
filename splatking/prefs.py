@@ -19,12 +19,17 @@ DEFAULTS: dict[str, Any] = {
     "video_run_colmap": False,
     "video_lenses": "both",
     # COLMAP section (shared by after-prepare + Run COLMAP)
+    "write_colmap_script": False,  # opt-in: write run_colmap.bat / .sh
     "colmap_matcher": "sequential",
     "colmap_use_gpu": True,
     "colmap_max_image_size": 3200,
     "colmap_max_num_features": 8192,
     "colmap_seq_overlap": 10,
     "colmap_min_num_matches": 15,
+    "colmap_dual_mode": True,
+    "colmap_base_lens": "ultra",
+    "colmap_dual_method": "auto",
+    "colmap_registrator_min_ratio": 0.50,
     "lidar_confidence_min": 1,
     "cam_mode": "every_n",
     "cam_every_n": 2,

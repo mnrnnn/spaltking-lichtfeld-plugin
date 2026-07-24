@@ -22,6 +22,8 @@ _SK_STATE: dict[str, Any] = {
     "out_dir": "",
     "last_report": "",
     "status": "Idle",
+    "status_log": [],  # live CLI-style lines (newest last)
+    "result_lines": [],  # per-step summaries (Feature / Match / Mapper)
     "capture_type": "",
     "progress": 0.0,
     "progress_label": "",

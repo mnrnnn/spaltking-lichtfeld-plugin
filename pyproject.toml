@@ -1,7 +1,7 @@
 [project]
 name = "splatking_importer"
-version = "0.2.3"
-description = "Import SplatKing captures (photo dual-lens, video dual-lens, LiDAR) into LichtFeld Studio, using all SplatKing metadata: per-camera intrinsics, blur/quality filtering, vocab-tree matching, and native LiDAR depth loss."
+version = "0.3.0"
+description = "Import SplatKing captures (photo dual-lens, video dual-lens, LiDAR) into LichtFeld Studio, using all SplatKing metadata: per-camera intrinsics, blur/quality filtering, dual-lens COLMAP merge (registrator/rig), vocab-tree matching, and native LiDAR depth loss."
 authors = [{ name = "SplatKing x LichtFeld" }]
 
 # Pure-python core has no hard runtime deps. numpy/opencv are used opportunistically
