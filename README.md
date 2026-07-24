@@ -42,7 +42,8 @@ Requirements: `numpy`. Optional: `opencv-python-headless`. Host needs `ffmpeg` f
 - **Path1:** Mapper(base list) → `image_registrator` → `point_triangulator` → `bundle_adjuster`.  
 - **Path2:** bootstrap mapper → `rig_configurator` → Mapper with `--Mapper.ba_refine_sensor_from_rig 0` (rotation lock; translation may still refine — COLMAP #3569).  
 - **GLOMAP not used** on dual/rig paths.  
-- FE uses `--ImageReader.single_camera_per_folder 1`. Mapper A uses `--Mapper.image_list_path`.
+- FE uses `--ImageReader.single_camera_per_folder 1`. Mapper A uses `--Mapper.image_list_path`.  
+- **Results quality lines** after COLMAP: registration rate (per lens), mean/median reprojection error (px, target `<1`), sparse point count / track length / pts-per-image.  
 
 ### COLMAP defaults
 

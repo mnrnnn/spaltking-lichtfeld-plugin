@@ -127,6 +127,219 @@ def shared_basenames(image_root: str, cams: list[str]) -> list[str]:
     return sorted(shared)
 
 
+def count_input_images(image_root: str, cameras: list[str]) -> dict[str, int]:
+    by = {c: len(list_image_basenames(image_root, c)) for c in cameras}
+    by["total"] = sum(by.values())
+    return by
+
+
+def _ensure_text_model(model_dir: str, colmap_bin: str = "") -> Optional[str]:
+    """Return a directory with cameras.txt/images.txt/points3D.txt (convert bin if needed)."""
+    if not model_dir or not os.path.isdir(model_dir):
+        return None
+    if os.path.isfile(os.path.join(model_dir, "images.txt")) and os.path.isfile(
+        os.path.join(model_dir, "points3D.txt")
+    ):
+        return model_dir
+    has_bin = os.path.isfile(os.path.join(model_dir, "images.bin")) and os.path.isfile(
+        os.path.join(model_dir, "points3D.bin")
+    )
+    if not has_bin or not colmap_bin:
+        return model_dir if has_bin else None
+    import subprocess
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="sk_txt_")
+    try:
+        proc = subprocess.run(
+            [
+                colmap_bin,
+                "model_converter",
+                "--input_path",
+                model_dir,
+                "--output_path",
+                tmp,
+                "--output_type",
+                "TXT",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if proc.returncode != 0:
+            return model_dir
+        # converter may write into tmp or tmp/0
+        if os.path.isfile(os.path.join(tmp, "images.txt")):
+            return tmp
+        nested = find_first_sparse_model(tmp)
+        return nested or model_dir
+    except OSError:
+        return model_dir
+
+
+def summarize_sparse_quality(
+    model_dir: str,
+    *,
+    image_root: str = "",
+    cameras: Optional[list[str]] = None,
+    colmap_bin: str = "",
+) -> dict[str, Any]:
+    """
+    Registration rate, mean/median reprojection error (px), sparse density.
+
+    Reprojection error comes from points3D ERROR (mean over points, COLMAP BA).
+    Target for clean GS training is usually <1 px.
+    """
+    cams = cameras or ["wide", "ultra"]
+    input_counts = count_input_images(image_root, cams) if image_root else {"total": 0}
+    out: dict[str, Any] = {
+        "model_dir": model_dir,
+        "input_total": int(input_counts.get("total", 0)),
+        "input_by_cam": {k: v for k, v in input_counts.items() if k != "total"},
+        "registered_total": 0,
+        "registered_by_cam": {},
+        "registration_ratio": 0.0,
+        "points": 0,
+        "mean_reproj_px": None,
+        "median_reproj_px": None,
+        "mean_track_length": None,
+        "points_per_image": None,
+        "ok_reproj": None,
+    }
+    text_dir = _ensure_text_model(model_dir, colmap_bin=colmap_bin)
+    if not text_dir:
+        return out
+
+    img_counts = count_model_images(text_dir)
+    reg_total = int(img_counts.get("total") or 0)
+    if reg_total < 0:
+        reg_total = 0
+    by_pref = dict(img_counts.get("by_prefix") or {})
+    out["registered_total"] = reg_total
+    out["registered_by_cam"] = {c: int(by_pref.get(c, 0)) for c in cams}
+    if out["input_total"] > 0:
+        out["registration_ratio"] = reg_total / out["input_total"]
+
+    errors: list[float] = []
+    track_lens: list[int] = []
+    points_txt = os.path.join(text_dir, "points3D.txt")
+    n_pts = 0
+    if os.path.isfile(points_txt):
+        try:
+            with open(points_txt, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    s = line.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    parts = s.split()
+                    if len(parts) < 8:
+                        continue
+                    n_pts += 1
+                    try:
+                        err = float(parts[7])
+                    except ValueError:
+                        continue
+                    if err >= 0:
+                        errors.append(err)
+                    # TRACK pairs after ERROR
+                    track_n = max(0, (len(parts) - 8) // 2)
+                    if track_n > 0:
+                        track_lens.append(track_n)
+        except OSError:
+            pass
+    out["points"] = n_pts
+    if errors:
+        errors_sorted = sorted(errors)
+        out["mean_reproj_px"] = sum(errors) / len(errors)
+        mid = len(errors_sorted) // 2
+        out["median_reproj_px"] = (
+            errors_sorted[mid]
+            if len(errors_sorted) % 2
+            else 0.5 * (errors_sorted[mid - 1] + errors_sorted[mid])
+        )
+        out["ok_reproj"] = out["mean_reproj_px"] < 1.0
+    if track_lens:
+        out["mean_track_length"] = sum(track_lens) / len(track_lens)
+    if reg_total > 0 and n_pts > 0:
+        out["points_per_image"] = n_pts / reg_total
+    return out
+
+
+def format_quality_result_lines(q: dict[str, Any]) -> list[str]:
+    """Human Results-panel lines for sparse quality."""
+    lines: list[str] = []
+    reg = int(q.get("registered_total") or 0)
+    total = int(q.get("input_total") or 0)
+    ratio = float(q.get("registration_ratio") or 0.0)
+    by_in = q.get("input_by_cam") or {}
+    by_reg = q.get("registered_by_cam") or {}
+    cam_bits = []
+    for cam in sorted(set(list(by_in.keys()) + list(by_reg.keys()))):
+        cam_bits.append(f"{cam} {int(by_reg.get(cam, 0))}/{int(by_in.get(cam, 0))}")
+    cam_s = ", ".join(cam_bits) if cam_bits else ""
+    if total > 0:
+        lines.append(
+            f"[quality] registered {reg}/{total} ({ratio:.0%})"
+            + (f" — {cam_s}" if cam_s else "")
+        )
+    else:
+        lines.append(f"[quality] registered {reg}" + (f" — {cam_s}" if cam_s else ""))
+
+    mean_e = q.get("mean_reproj_px")
+    med_e = q.get("median_reproj_px")
+    if mean_e is not None:
+        flag = "OK" if mean_e < 1.0 else "HIGH (ghosting risk)"
+        med_s = f", median {med_e:.3f}px" if med_e is not None else ""
+        lines.append(
+            f"[quality] mean reproj {mean_e:.3f}px{med_s} — target <1px [{flag}]"
+        )
+    else:
+        lines.append("[quality] mean reproj n/a (no points3D errors yet)")
+
+    n_pts = int(q.get("points") or 0)
+    tl = q.get("mean_track_length")
+    ppi = q.get("points_per_image")
+    dens = []
+    if tl is not None:
+        dens.append(f"mean track {tl:.1f}")
+    if ppi is not None:
+        dens.append(f"~{ppi:.0f} pts/image")
+    dens_s = ", ".join(dens)
+    sparse_note = ""
+    if n_pts > 0 and ppi is not None and ppi < 50:
+        sparse_note = " — sparse (floater risk)"
+    lines.append(
+        f"[quality] points {n_pts:,}"
+        + (f" — {dens_s}" if dens_s else "")
+        + sparse_note
+    )
+    return lines
+
+
+def emit_sparse_quality(
+    *,
+    sparse_dir: str,
+    image_root: str,
+    cameras: list[str],
+    colmap_bin: str = "",
+    emit: Optional[Callable[..., Any]] = None,
+) -> dict[str, Any]:
+    model = find_first_sparse_model(sparse_dir) or os.path.join(sparse_dir, "0")
+    if not os.path.isdir(model):
+        model = sparse_dir
+    q = summarize_sparse_quality(
+        model, image_root=image_root, cameras=cameras, colmap_bin=colmap_bin
+    )
+    if emit:
+        for line in format_quality_result_lines(q):
+            try:
+                emit(line, result=True)
+            except TypeError:
+                emit(line)
+    return q
+
+
 def count_model_images(model_dir: str) -> dict[str, Any]:
     """Best-effort count of registered images (text model preferred)."""
     out: dict[str, Any] = {
@@ -154,8 +367,7 @@ def count_model_images(model_dir: str) -> dict[str, Any]:
                         pref = name.split("/", 1)[0] if "/" in name else "_"
                         by[pref] = by.get(pref, 0) + 1
         elif os.path.isfile(images_bin):
-            # Unknown without full parser — treat as present but opaque.
-            n = -1
+            n = -1  # unknown without full parser
     except OSError:
         pass
     out["total"] = n
@@ -398,6 +610,20 @@ def run_dual_colmap(
     cams_for_fe = inject_cameras or []
     os.makedirs(sparse_dir, exist_ok=True)
 
+    def finish(path_used: str, cmds: Optional[list] = None) -> dict[str, Any]:
+        report["path_used"] = path_used
+        if cmds is not None:
+            report["commands"] = [" ".join(c) for c in cmds]
+        q = emit_sparse_quality(
+            sparse_dir=sparse_dir,
+            image_root=image_root,
+            cameras=list(cameras),
+            colmap_bin=colmap_bin,
+            emit=emit,
+        )
+        report["quality"] = q
+        return report
+
     if not is_dual or dual_method == "wide_only" or (len(cameras) == 1):
         # Single-lens / forced wide-only
         only = ["wide"] if "wide" in cameras else [cameras[0]]
@@ -423,9 +649,7 @@ def run_dual_colmap(
         )
         emit(f"COLMAP dual path: wide-only ({only[0]})")
         run_sequence(cmds, on_log=on_log)
-        report["path_used"] = "wide_only"
-        report["commands"] = [" ".join(c) for c in cmds]
-        return report
+        return finish("wide_only", cmds)
 
     # Shared FE + matcher + cross-lens
     fe_match = build_feature_match_commands(
@@ -473,8 +697,7 @@ def run_dual_colmap(
                     report=report,
                 )
                 if ok:
-                    report["path_used"] = "registrator"
-                    return report
+                    return finish("registrator")
                 emit("Path1 registrator below threshold — trying fallback")
             elif method == "rig":
                 ok = _path_rig(
@@ -489,8 +712,7 @@ def run_dual_colmap(
                     report=report,
                 )
                 if ok:
-                    report["path_used"] = "rig"
-                    return report
+                    return finish("rig")
                 emit("Path2 rig failed — trying wide-only")
             else:
                 only = ["wide"] if "wide" in cameras else [base_lens]
@@ -511,9 +733,8 @@ def run_dual_colmap(
                 emit(f"Path3 wide-only mapper ({only[0]})")
                 # Clear previous sparse children carefully — mapper writes new models
                 run_sequence([mapper], on_log=on_log)
-                report["path_used"] = "wide_only"
                 emit("Warning: dual integration fell back to wide-only", result=True)
-                return report
+                return finish("wide_only", [mapper])
         except Exception as e:
             emit(f"Dual path {method} error: {e}")
             continue
